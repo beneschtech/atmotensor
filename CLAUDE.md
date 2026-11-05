@@ -1,0 +1,145 @@
+# AtmoTensor - project notes for Claude
+
+Own-hardware weather data engine. Customers query it; it stores gridded model
+data (GFS, RRFS, HRRR, ...) and observations (METAR/SYNOP, soundings, TAF,
+PIREP, ...) and answers point, flight-route and area-product queries. Name:
+AtmoTensor; C++ namespace `atmo`; planned mount `/atmotensor`. C++20, Linux,
+static library `libatmo` (.hpp declarations + src/*.cpp). Owner: Chris (C++ /
+Qt / Symfony background, AIX-era storage instincts, wants to avoid
+third-party/hosted dependencies).
+
+## Coding conventions
+
+`docs/CONVENTIONS.md` (agreed 2026-11-05) is binding and overrides older
+code style: C++20; headers hold declarations only, with code in
+`src/*.cpp` (exceptions: trivial getters/setters, templates, vendored
+code); 80 columns; 2 spaces, no tabs; Allman braces everywhere; long
+signatures one parameter per line. `.clang-format` encodes the layout;
+run `clang-format -i` on every file you touch (never on `third_party/`).
+
+## Build and test
+
+CMake only (CLion); presets in CMakePresets.json: default, asan, ci.
+
+    cmake --preset default && cmake --build --preset default -j
+    ctest --preset default
+    cmake --preset asan && cmake --build --preset asan -j && ctest --preset asan
+    ./build-cmake/bench_kdtree; ./build-cmake/bench_grid
+    # options: ATMO_SANITIZE ATMO_WERROR ATMO_BUILD_TESTS ATMO_BUILD_BENCH
+
+No Catch2/gtest: tests use the tiny harness in `tests/check.hpp` (TEST, CHECK,
+CHECK_NEAR; non-fatal). Keep new tests dependency-free. `-ffp-contract=off` is
+deliberate: tree results must stay bit-identical to the brute-force oracles.
+Run the asan preset after touching anything with pointers or file I/O.
+
+## Layout
+
+Each `include/atmo/<name>.hpp` (declarations) has a `src/<name>.cpp`, except
+`kdtree.hpp` (templates only). CMake builds `libatmo` (target `atmo::atmo`)
+and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
+
+- `include/atmo/kdtree.hpp`   `KdTree4<T>` static flat-array 4D k-d tree;
+  `KdTreeView4<T>` searches the same three arrays wherever they live (an
+  mmap); KdTree4 delegates to it
+- `include/atmo/geo.hpp`      `embed()` (lat, lon, height, time) -> 4D point
+- `include/atmo/grid.hpp`     GridIdentity/GridKey, GridData, Grid
+  (locate/nearest), rotation
+- `include/atmo/gridstore.hpp` GridStore: immutable on-disk grid files
+- `include/atmo/crc32.hpp`    CRC-32 (zlib-compatible)
+- `include/atmo/source.hpp`   SourceClass (metric per source class),
+  SourceRegistry (JSON config)
+- `include/atmo/obs_segment.hpp` ObsSegmentWriter / ObsSegment: immutable
+  `*.seg` files (reports | values | raw | prebuilt tree), mmap'd, opened
+  from the file without a rebuild
+- `third_party/`  vendored single headers (nlohmann/json 3.11.3, MIT); see
+  its README.md. Included as `<nlohmann/json.hpp>` via a SYSTEM include
+  path. Don't edit or reformat vendored files.
+- `tests/`  harness (`check.hpp/.cpp`), brute-force oracles,
+  `lambert.hpp/.cpp` (synthetic projected grid; test scaffolding only)
+- `bench/`  kdtree and gridstore timings
+
+## Design decisions (settled - don't relitigate without a reason)
+
+**One 4D metric, per-source time weight.** `embed()` gives x,y,z in km as a 3D
+vector at radius R + vertical_scale*height (no dateline/pole problems; chord is
+monotonic in great-circle distance) and w = km_per_second*(t - t0). The time
+weight (lambda) differs per source (METAR ~1 h, sounding ~6-12 h, PIREP ~1-2 h),
+so build ONE TREE PER SOURCE CLASS; never mix lambdas in one tree. Time is
+stored relative to a per-tree t0 (float epoch seconds lose 128 s resolution).
+TAFs / SIGMETs and anything with a validity interval or spatial extent are NOT
+points: they belong in an interval/R-tree structure, not KdTree4.
+
+**KdTree4 contract.** Built once, immutable. Implicit balanced layout over flat
+arrays (`points()`, `ids()`, `axes()`), leaf size 8, split on widest axis.
+Results are ordered by (d2, id); build breaks ties by id. Pruning uses
+`d*d <= bound` (not `<`) so equal-distance candidates with lower ids are found.
+Queries must equal a scan using `KdTree4::dist2` exactly. No pointers, so the
+arrays can be uploaded to OpenCL buffers as-is.
+
+**Grids are index space + coordinate arrays.** Every grid is a regular (i, j)
+array (index = j*ni + i, i fastest, j increasing); projection is just the
+lat/lon arrays. Ingest must normalise GRIB scan modes to this order for data
+AND coordinates. Identity = canonical bytes (for GRIB2: section 3 template
+octets) + ni, nj, periodic_i, hashed with FNV-1a to a 64-bit GridKey; the full
+bytes are verified on load, so collisions can't alias grids. All fields on the
+same grid share one definition. Only structured grids; unstructured grids
+(reduced Gaussian, cubed sphere) need their own class.
+
+**Rotation.** alpha = angle of the grid +i axis CCW from local east, derived
+from the coordinate arrays (centred difference), so no PROJ is needed.
+`rotate_to_earth(alpha,u,v)` converts grid-relative winds. Check the GRIB
+"resolution and component flags" before rotating: u/v may already be
+earth-relative.
+
+**locate() accuracy.** Nearest point via a lazily built KdTree4, then inverse
+bilinear solve of the surrounding cells in the query's tangent plane. Cells are
+treated as flat quads: fractions are off by up to ~1e-3 of a cell for 1 degree
+cells at mid latitudes, scaling with cell size (~1e-4 at 0.25 deg, ~1e-5 at
+3 km). Degenerate pole cells are handled by verifying the solve's residual
+(the quadratic has a spurious root at the shared corner). A regular lat/lon
+fast path with exact arithmetic is a possible later optimisation.
+
+**Storage.** Grid and obs data are write-once, so: immutable checksummed files,
+temp file + fsync + rename + dir fsync, idempotent put, mmap on read.
+Preallocated files on XFS (O_DIRECT / io_uring) to start; raw block device only
+if profiling demands it - the layout is identical either way. Grids are
+re-fetchable from NOAA; observations are the irreplaceable part (replicate
+sealed segments off-box). Tiles are 4 KB-aligned. Keep hot-tile LRU in RAM and
+coalesce identical in-flight requests.
+
+## How we work (two Claudes)
+
+Design happens in the desktop-app session (Chris + architect Claude); this
+terminal session does the implementation. Specs: `docs/design/*.md` (start with
+`00-overview.md`, decisions D1-D7). Work queue: `docs/TASKS.md` (do tasks in
+order, tests first, ASan, no commits unless asked). Anything ambiguous or
+apparently wrong in a spec goes in `docs/QUESTIONS.md` - do not invent
+architecture; park the task and take another. Keep CLAUDE.md in sync when a
+task adds a convention.
+
+Decisions so far (see 00-overview.md): latest-only retention (newest K runs,
+72 h obs), HTTP/JSON + binary tiles served by a FastCGI responder behind nginx
+(nginx owns TLS/auth/limits), separate ingest and query daemons over immutable
+files + atomic manifest, corrections keep history (latest wins), raw feed
+journal for durability, eccodes from the distro package (hand-built via
+-DECCODES_ROOT must also work; core must build without it).
+
+## Working notes
+
+- The Claude desktop app's linked shell is a sandboxed VM: it may lack CMake and
+  cannot delete files in connected folders. On the real workstation neither applies.
+  (The old plain Makefile existed for that VM; it was removed 2026-11-05.)
+- Benchmarks (2 cores, -O2): 2M-point KdTree4 builds in ~0.45 s, ~1.2 us
+  nearest, ~3 us 8-NN; HRRR-size grid: write 0.42 s, load+verify 0.07 s,
+  ~1.4 us/locate.
+- Do not commit or push unless asked.
+- Conventions from T1/T2: JSON text entry points are `from_text()` / `from_file()`
+  (a `from_json(string_view)` overload would be ambiguous with `json`); config errors
+  are `std::invalid_argument`, file corruption is `std::runtime_error`. On-disk readers
+  recompute every offset from the counts, check every CRC, and run structural checks
+  (slices in range, tree ids a permutation) even with valid CRCs. Sealed files are
+  published with link() (never replaces an existing file). Each new test file must be
+  added to the `foreach` in CMakeLists.txt.
+- Vertical position is always a geometric height in metres above MSL (reports and
+  each profile value alike), never a level index or geopotential height; ingest
+  converts (Q3).
