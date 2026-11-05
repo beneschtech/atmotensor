@@ -42,9 +42,8 @@ values (struct-of-arrays, contiguous per report):
 
 raw: the original message bytes, stored ONCE per report; a dozen values point
 at it via the report row. Sounding profiles: one report whose values are a
-level-ordered profile (var_code encodes variable; a `level` column is added to
-values when the source class is a profile type - decide in implementation and
-record in QUESTIONS.md if unsure).
+level-ordered profile: every value carries the geometric height of its
+level (`height_m`, metres above MSL), see Q3.
 
 ## Segment file (`*.seg`)
 
@@ -85,11 +84,23 @@ return `ReportView` (position, times, values span, raw span, flags).
 
 ## Station table
 
-Append-only generations `stations-<gen>.tbl` referenced by the manifest.
-station_ref values are never reused. Fixed stations carry validity intervals
-for position/elevation changes. Mobile platforms (ships, buoys, aircraft) use
-station_ref 0 or a platform entry without position; position lives on each
-report.
+Implemented in T3 (`include/atmo/stations.hpp`); decisions D10 and Q6.
+
+- Authoritative list in MySQL (D10); ingest exports a full copy as an
+  immutable generation `stations/stations-<gen:016x>.tbl` referenced by the
+  manifest, so each snapshot pins one generation.
+- `station_ref` (u32, > 0) identifies the station, not one of its periods,
+  and is never reused: a generation contains every ref of the previous one
+  and new refs are above its `max_ref` (MySQL AUTO_INCREMENT values or
+  assigned by the builder). 0 = no station.
+- Identifiers are typed (icao, wmo, wigos, platform) and bound to a station
+  for a validity interval; for one identifier the intervals never overlap
+  across the table, so (identifier, time) names at most one station.
+- Fixed stations carry position periods [from, to) for moves and
+  re-surveys. Mobile platforms (flag `mobile`) and provisional stations
+  (flag `provisional`: seen in a report, not yet in the authoritative list;
+  ingest creates them rather than dropping data) may have no periods;
+  positions then come from each report.
 
 ## Retention
 

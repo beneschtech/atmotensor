@@ -14,6 +14,7 @@
 #include <type_traits>
 
 #include "atmo/crc32.hpp"
+#include "fileio.hpp"
 
 static_assert(
   __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
@@ -23,16 +24,6 @@ namespace atmo
 {
 namespace obsseg
 {
-namespace
-{
-
-std::size_t align(std::size_t v, std::size_t a)
-{
-  return (v + a - 1) / a * a;
-}
-
-}  // namespace
-
 Layout::Layout(
   std::uint64_t n_reports,
   std::uint64_t n_values,
@@ -47,7 +38,7 @@ Layout::Layout(
     std::size_t c = cur;
     body(c);
     sec_len[s] = c - cur;
-    cur = align(c, kPage);
+    cur = detail::align_up(c, kPage);
   };
   section(
     0,
@@ -55,7 +46,7 @@ Layout::Layout(
     {
       for (std::size_t k = 0; k < kNumRCols; ++k)
       {
-        c = align(c, 8);
+        c = detail::align_up(c, 8);
         rcol[k] = c;
         c += n * kRColSize[k];
       }
@@ -66,7 +57,7 @@ Layout::Layout(
     {
       for (std::size_t k = 0; k < kNumVCols; ++k)
       {
-        c = align(c, 8);
+        c = detail::align_up(c, 8);
         vcol[k] = c;
         c += m * kVColSize[k];
       }
@@ -94,116 +85,7 @@ Layout::Layout(
 
 }  // namespace obsseg
 
-namespace
-{
-
 using namespace obsseg;
-
-void write_all(int fd, const void* buf, std::size_t n, std::size_t off)
-{
-  const char* p = static_cast<const char*>(buf);
-  while (n > 0)
-  {
-    const ssize_t w = ::pwrite(fd, p, n, static_cast<off_t>(off));
-    if (w < 0)
-    {
-      if (errno == EINTR)
-      {
-        continue;
-      }
-      throw std::runtime_error(
-        std::string("ObsSegment: write failed: ") + std::strerror(errno));
-    }
-    p += w;
-    off += static_cast<std::size_t>(w);
-    n -= static_cast<std::size_t>(w);
-  }
-}
-
-void fsync_dir(const std::filesystem::path& dir)
-{
-  const int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-  if (dfd < 0)
-  {
-    throw std::runtime_error(
-      "ObsSegment: cannot open directory " + dir.string());
-  }
-  const int rc = ::fsync(dfd);
-  ::close(dfd);
-  if (rc != 0)
-  {
-    throw std::runtime_error(
-      "ObsSegment: fsync of " + dir.string() + " failed");
-  }
-}
-
-// Temp file in the target directory -> fsync -> link() to the final name
-// (refuses to replace an existing file) -> unlink temp -> fsync directory.
-void write_atomically(
-  const std::filesystem::path& path,
-  const std::vector<unsigned char>& file)
-{
-  namespace fs = std::filesystem;
-  const fs::path dir =
-    path.has_parent_path() ? path.parent_path() : fs::path(".");
-  // Create missing directories, remembering which, so their own entries
-  // can be made durable too.
-  std::vector<fs::path> created;
-  for (fs::path d = dir; !d.empty() && !fs::exists(d); d = d.parent_path())
-  {
-    created.push_back(d);
-    if (!d.has_parent_path() || d.parent_path() == d)
-    {
-      break;
-    }
-  }
-  fs::create_directories(dir);
-
-  static std::atomic<unsigned> counter{0};
-  const fs::path tmp(
-    path.string() + ".tmp." + std::to_string(::getpid()) + "." +
-    std::to_string(counter++));
-  const int fd =
-    ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
-  if (fd < 0)
-  {
-    throw std::runtime_error(
-      "ObsSegment: cannot create " + tmp.string() + ": " +
-      std::strerror(errno));
-  }
-  try
-  {
-    write_all(fd, file.data(), file.size(), 0);
-    if (::fsync(fd) != 0)
-    {
-      throw std::runtime_error(
-        std::string("ObsSegment: fsync: ") + std::strerror(errno));
-    }
-  }
-  catch (...)
-  {
-    ::close(fd);
-    ::unlink(tmp.c_str());
-    throw;
-  }
-  ::close(fd);
-  if (::link(tmp.c_str(), path.c_str()) != 0)
-  {
-    const int err = errno;
-    ::unlink(tmp.c_str());
-    throw std::runtime_error(
-      "ObsSegment: cannot publish " + path.string() + ": " +
-      std::strerror(err));
-  }
-  ::unlink(tmp.c_str());
-  fsync_dir(dir);
-  for (const fs::path& d : created)
-  {
-    fsync_dir(d.has_parent_path() ? d.parent_path() : fs::path("."));
-  }
-}
-
-}  // namespace
 
 ValuesView::ValuesView(
   const std::uint16_t* var,
@@ -398,7 +280,7 @@ SealedSegment ObsSegmentWriter::seal(const std::filesystem::path& path)
   h.crc_header = crc32(&h, offsetof(SegHeader, crc_header));
   std::memcpy(file.data(), &h, sizeof h);
 
-  write_atomically(path, file);
+  detail::publish_file(path, file, "ObsSegment");
   sealed_ = true;
 
   SealedSegment info;
@@ -425,19 +307,6 @@ void ObsSegmentWriter::release()
 
 // ---------------------------------------------------------------------------
 // ObsSegment
-
-struct ObsSegment::Mapping
-{
-  void* p = MAP_FAILED;
-  std::size_t n = 0;
-  ~Mapping()
-  {
-    if (p != MAP_FAILED)
-    {
-      ::munmap(p, n);
-    }
-  }
-};
 
 std::shared_ptr<const ObsSegment> ObsSegment::open(
   const std::filesystem::path& path,
@@ -525,32 +394,10 @@ ObsSegment::ObsSegment(const std::filesystem::path& path, Verify verify)
 {
   auto bad = [&](const std::string& why)
   { return std::runtime_error("ObsSegment: " + path.string() + ": " + why); };
-  const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-  if (fd < 0)
-  {
-    throw bad(std::strerror(errno));
-  }
-  struct stat st;
-  if (::fstat(fd, &st) != 0)
-  {
-    ::close(fd);
-    throw bad("fstat failed");
-  }
-  const std::size_t fsize = static_cast<std::size_t>(st.st_size);
-  if (fsize < kPage)
-  {
-    ::close(fd);
-    throw bad("truncated (shorter than header page)");
-  }
-  map_ = std::make_shared<Mapping>();
-  map_->p = ::mmap(nullptr, fsize, PROT_READ, MAP_PRIVATE, fd, 0);
-  ::close(fd);
-  if (map_->p == MAP_FAILED)
-  {
-    throw bad("mmap failed");
-  }
-  map_->n = fsize;
-  base_ = static_cast<const unsigned char*>(map_->p);
+  const auto file = detail::MappedFile::open(path, kPage, "ObsSegment");
+  map_ = file;
+  base_ = file->data();
+  const std::size_t fsize = file->size();
 
   std::memcpy(&h_, base_, sizeof h_);
   if (std::memcmp(h_.magic, kMagic, 8) != 0)

@@ -17,6 +17,7 @@ deciding silently.
 | D4 | Corrections | **Latest version wins by default, older versions kept** (within retention) | Queries see the newest version; `as_of` can reproduce an earlier answer. See `01-obs-store.md`. |
 | D5 | Time weighting | Per-source-class lambda, one k-d tree per source class | Settled earlier; see CLAUDE.md. |
 | D6 | Storage substrate | Immutable files on XFS first; raw block device only if profiling demands | Settled earlier; layout identical either way. |
+| D10 | Reference data | **MySQL is the authoritative, editable store for rarely-written reference data** (stations, customers/API keys, variable registry, model/product config). The engine never queries it for snapshot data: ingest exports e.g. stations as immutable generation files named by the manifest. Customer/auth data may be read directly with an in-RAM TTL cache. | SQL fits relational, hand-edited data; exporting keeps snapshots reproducible and query daemons independent of MySQL. Client library optional like eccodes (core builds without it). Decided 2026-11-05. |
 | D7 | Durability | Raw feed journal fsynced + replicated off-box; sealed files immutable | Observations are the only irreplaceable data; grids are re-fetchable from NOAA. |
 
 Defaults chosen by the architect (not asked, cheap to change): config as JSON

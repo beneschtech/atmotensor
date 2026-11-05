@@ -1,6 +1,7 @@
 #include "check.hpp"
 
 #include <cstdio>
+#include <exception>
 
 namespace tst
 {
@@ -38,7 +39,18 @@ int run_all()
     const int before = failures();
     std::printf("[ RUN  ] %s\n", t.first.c_str());
     std::fflush(stdout);
-    t.second();
+    try
+    {
+      t.second();
+    }
+    catch (const std::exception& e)
+    {
+      fail(t.first.c_str(), 0, std::string("uncaught exception: ") + e.what());
+    }
+    catch (...)
+    {
+      fail(t.first.c_str(), 0, "uncaught non-standard exception");
+    }
     if (failures() == before)
     {
       std::printf("[  OK  ] %s\n", t.first.c_str());

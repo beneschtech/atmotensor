@@ -22,7 +22,7 @@ Status legend: [ ] todo, [~] in progress, [x] done.
 - [x] T2  Obs segment write/read (01-obs-store.md): `ObsSegmentWriter`
       (add_report(...), seal(path)), `ObsSegment::open(path)` with mmap, CRCs,
       prebuilt tree. Acceptance tests 1, 2, 5, 6.
-- [ ] T3  Station table (append-only generations, validity intervals, stable
+- [x] T3  Station table (append-only generations, validity intervals, stable
       refs). Tests: round trip, ref stability across generations, lookup by
       id and by (id, time).
 - [ ] T4  `ObsIndex`: visible-version knn/radius/corridor across segments and

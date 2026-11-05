@@ -55,3 +55,14 @@ Q5 [open] Small choices made in T1/T2 that the spec did not pin down; all
     d) Rows keep insertion order (tree ids = row index); report_key is
        supplied by the caller - no hashing helper yet (belongs to ingest,
        needs the report_type definition).
+Q6 [answered] Station table and reference data (2026-11-05, in the
+    implementation session). Decisions: MySQL holds the authoritative
+    reference data (D10) and the engine reads exported immutable
+    generations; identifiers are typed (icao, wmo, wigos, platform) with
+    validity intervals; unknown stations become provisional entries instead
+    of being dropped; each generation is a full copy; a ref names the
+    station, not a period; refs only grow (explicit refs must exceed the
+    previous max_ref). Implemented in T3. Open for later: the MySQL schema
+    (docs/design/schema.sql), the export job, and which client library
+    (MySQL Connector/C vs MariaDB Connector/C), as an optional dependency
+    like eccodes.

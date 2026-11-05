@@ -41,8 +41,10 @@ add_library(atmo STATIC
   src/geo.cpp
   src/grid.cpp
   src/gridstore.cpp
+  src/fileio.cpp
   src/obs_segment.cpp
-  src/source.cpp)
+  src/source.cpp
+  src/stations.cpp)
 add_library(atmo::atmo ALIAS atmo)
 target_include_directories(atmo PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
@@ -66,7 +68,7 @@ endif()
 
 if(ATMO_BUILD_TESTS)
   enable_testing()
-  foreach(t kdtree grid source obs)
+  foreach(t kdtree grid source obs stations)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} PRIVATE atmo_testkit)
     atmo_target_defaults(test_${t})

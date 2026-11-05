@@ -51,6 +51,11 @@ and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
 - `include/atmo/obs_segment.hpp` ObsSegmentWriter / ObsSegment: immutable
   `*.seg` files (reports | values | raw | prebuilt tree), mmap'd, opened
   from the file without a rebuild
+- `include/atmo/stations.hpp` StationTableBuilder / StationTable: immutable
+  station generations (typed ids with validity, position periods, stable
+  refs); authoritative copy will live in MySQL (D10)
+- `src/fileio.hpp/.cpp` internal: publish_file (temp+fsync+link+dir fsync),
+  MappedFile, align_up; shared by every immutable-file writer/reader
 - `third_party/`  vendored single headers (nlohmann/json 3.11.3, MIT); see
   its README.md. Included as `<nlohmann/json.hpp>` via a SYSTEM include
   path. Don't edit or reformat vendored files.

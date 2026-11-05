@@ -1,5 +1,6 @@
 // Minimal test harness (no external dependencies).  Checks are non-fatal:
-// a failing CHECK is reported and the test keeps going.
+// a failing CHECK is reported and the test keeps going.  An exception that
+// escapes a test fails that test and the run continues.
 #pragma once
 
 #include <cmath>

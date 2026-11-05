@@ -365,12 +365,10 @@ class ObsSegment
     float r_km) const;
 
  private:
-  struct Mapping;
-
   ObsSegment(const std::filesystem::path& path, Verify verify);
 
   std::filesystem::path path_;
-  std::shared_ptr<Mapping> map_;
+  std::shared_ptr<const void> map_;  // keeps the mapping alive
   const unsigned char* base_ = nullptr;
   obsseg::SegHeader h_{};
   obsseg::Layout layout_{0, 0, 0};
