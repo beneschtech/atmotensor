@@ -1,0 +1,51 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "RelWithDebInfo",
+      "binaryDir": "${sourceDir}/build-cmake",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+    },
+    {
+      "name": "asan",
+      "displayName": "ASan + UBSan (tests only)",
+      "binaryDir": "${sourceDir}/build-cmake-asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ATMO_SANITIZE": "ON",
+        "ATMO_BUILD_BENCH": "OFF"
+      }
+    },
+    {
+      "name": "ci",
+      "displayName": "CI (warnings are errors)",
+      "inherits": "asan",
+      "binaryDir": "${sourceDir}/build-cmake-ci",
+      "cacheVariables": { "ATMO_WERROR": "ON" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "default", "configurePreset": "default" },
+    { "name": "asan", "configurePreset": "asan" },
+    { "name": "ci", "configurePreset": "ci" }
+  ],
+  "testPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "ci",
+      "configurePreset": "ci",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

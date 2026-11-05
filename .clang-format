@@ -1,0 +1,33 @@
+# Encodes docs/CONVENTIONS.md. Embedded SQL alignment is manual (inside
+# string literals clang-format leaves it alone).
+---
+Language: Cpp
+BasedOnStyle: Google
+Standard: c++20
+ColumnLimit: 80
+IndentWidth: 2
+ContinuationIndentWidth: 2
+UseTab: Never
+TabWidth: 2
+AccessModifierOffset: -1
+BreakBeforeBraces: Allman
+IndentCaseLabels: true
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: All
+# Trivial getters/setters inside a class body may stay on one line.
+AllowShortFunctionsOnASingleLine: InlineOnly
+# Long signatures: break after "(" and put one parameter per line,
+# indented by ContinuationIndentWidth.
+AlignAfterOpenBracket: AlwaysBreak
+BinPackParameters: false
+AllowAllParametersOfDeclarationOnNextLine: false
+BinPackArguments: true
+NamespaceIndentation: None
+FixNamespaceComments: true
+DerivePointerAlignment: false
+PointerAlignment: Left
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive
