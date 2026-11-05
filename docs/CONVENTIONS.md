@@ -21,7 +21,9 @@ every file you touch.
 
 Headers hold declarations; code goes in `.cpp` files.
 
-- `include/atmo/<name>.hpp` declares; `src/<name>.cpp` implements.
+- `include/atmo/<name>.h` declares; `src/<name>.cpp` implements.
+- Header files use the `.h` extension, for C and C++ alike. Vendored
+  files keep their upstream names (`nlohmann/json.hpp`).
 - Only trivial getters and setters may be defined in a header: a single
   `return member_;` or `member_ = v;`, written inside the class body.
   Returning `member_[k]`, `member_.size()` or `member_.empty()` also counts.
@@ -37,7 +39,7 @@ Headers hold declarations; code goes in `.cpp` files.
   `.cpp`.
 - **Exception: vendored code** (`third_party/`), which is used as shipped.
 - Test helpers follow the same rule. The harness macros in
-  `tests/check.hpp` are macros, so they stay in the header.
+  `tests/check.h` are macros, so they stay in the header.
 
 ## Layout
 
@@ -149,6 +151,20 @@ Headers hold declarations; code goes in `.cpp` files.
 - On-disk and GPU-facing data uses fixed-width types (`std::uint32_t`,
   ...). Every on-disk struct has a `static_assert` on its size. In-memory
   indices use `std::size_t`.
+- **Use `f32` wherever the precision allows**, so data can go to OpenCL
+  kernels as-is (positions, heights, values, offsets, tree points). f32
+  lat/lon resolve about 1.7 m. Wider types need a reason, written as a
+  comment where they are declared. The current exceptions:
+  - times: `i64` seconds or milliseconds (f32 cannot hold epoch times;
+    OpenCL 1.2 has `long`);
+  - ids, keys and sequence numbers: `u32`/`u64`;
+  - grid lat/lon (`GridData`, grid files): `f64`, because `Grid::locate()`
+    solves within a cell and f32 would cost ~5e-4 of a 3 km cell; they
+    are used on the CPU only, and kernels sample by grid index;
+  - configuration parameters (`SourceClass`): `double`, they are settings,
+    not data;
+  - intermediate arithmetic (e.g. inside `embed()`) may use double and
+    narrow the result.
 - On-disk formats: magic number plus version, header CRC, a CRC for
   every section, 4 KiB-aligned sections. Readers recompute every offset
   and run structural checks even when the CRCs pass. Sealed files are
@@ -165,7 +181,7 @@ Headers hold declarations; code goes in `.cpp` files.
 ## Tests
 
 - One test file per component (`tests/test_<name>.cpp`), using only
-  `tests/check.hpp`. No outside test frameworks.
+  `tests/check.h`. No outside test frameworks.
 - Write tests from the spec's acceptance list first. Use fixed random
   seeds, and compare against a brute-force oracle where one exists.
 - Mutation check: deliberately break the core logic and confirm that a

@@ -12,10 +12,10 @@
 #include <string>
 #include <vector>
 
-#include "atmo/crc32.hpp"
-#include "atmo/obs_segment.hpp"
-#include "atmo/source.hpp"
-#include "check.hpp"
+#include "atmo/crc32.h"
+#include "atmo/obs_segment.h"
+#include "atmo/source.h"
+#include "check.h"
 
 using namespace atmo;
 namespace fs = std::filesystem;
@@ -109,8 +109,8 @@ random_reports(std::mt19937_64& rng, std::size_t n, std::size_t dups)
     }
     else
     {
-      r.lat_deg = lat(rng);
-      r.lon_deg = lon(rng);
+      r.lat_deg = static_cast<float>(lat(rng));
+      r.lon_deg = static_cast<float>(lon(rng));
       r.height_m = static_cast<float>(h(rng));
       r.obs_time_s = kBucket + dt(rng);
     }
@@ -124,7 +124,8 @@ random_reports(std::mt19937_64& rng, std::size_t n, std::size_t dups)
           static_cast<std::uint16_t>(rng() % 60), static_cast<float>(val(rng)),
           static_cast<std::uint16_t>(rng() % 3),
           v % 3 == 0 ? std::numeric_limits<float>::quiet_NaN()
-                     : static_cast<float>(h(rng))});
+                     : static_cast<float>(h(rng)),
+          static_cast<float>(v) * 0.01f, static_cast<float>(v) * -0.02f});
     }
     const int len = rawlen(rng);
     for (int b = 0; b < len; ++b)
@@ -169,6 +170,8 @@ bool report_equal(const ObsSegment& s, std::size_t i, const ObsReport& r)
       v.values.var_code(k) == r.values[k].var_code &&
       bits_equal(v.values.value(k), r.values[k].value) &&
       v.values.qc(k) == r.values[k].qc &&
+      bits_equal(v.values.dlat_deg(k), r.values[k].dlat_deg) &&
+      bits_equal(v.values.dlon_deg(k), r.values[k].dlon_deg) &&
       bits_equal(
         v.values.height_m(k),
         std::isnan(r.values[k].height_m) ? r.height_m : r.values[k].height_m);
@@ -420,8 +423,8 @@ TEST(segment_mobile_platform_positions)
     r.receipt_seq = 50 + static_cast<std::uint64_t>(i);
     r.receipt_time_ms = (kBucket + 60 * i + 5) * 1000;
     r.obs_time_s = kBucket + 60 * i;
-    r.lat_deg = 40.0 + 0.1 * i;  // a flight track
-    r.lon_deg = -100.0 + 0.15 * i;
+    r.lat_deg = static_cast<float>(40.0 + 0.1 * i);  // a flight track
+    r.lon_deg = static_cast<float>(-100.0 + 0.15 * i);
     r.height_m = 9000.0f + 10.0f * static_cast<float>(i);
     r.station_ref = 0;  // mobile
     r.values = {ObsValue{1, 220.0f + static_cast<float>(i)}};
@@ -460,8 +463,8 @@ TEST(segment_raw_shared_by_values)
   r.receipt_seq = 7;
   r.receipt_time_ms = (kBucket + 3240) * 1000;
   r.obs_time_s = kBucket + 3180;
-  r.lat_deg = 35.39;
-  r.lon_deg = -97.60;
+  r.lat_deg = 35.39f;
+  r.lon_deg = -97.60f;
   r.height_m = 395;
   r.station_ref = 1234;
   for (std::uint16_t v = 0; v < 12; ++v)
@@ -506,18 +509,22 @@ TEST(segment_profile_levels)
   r.receipt_seq = 1;
   r.receipt_time_ms = b * 1000;
   r.obs_time_s = b;
-  r.lat_deg = 35.18;
-  r.lon_deg = -97.44;
+  r.lat_deg = 35.18f;
+  r.lon_deg = -97.44f;
   r.height_m = 357;
   r.station_ref = 72357;
   for (int lev = 0; lev < 100; ++lev)
   {
     const float z =
       357.0f + 150.0f * static_cast<float>(lev);  // geometric, m MSL
+    // Drift: the balloon moves north-east as it rises (Q3a).
+    const float dlat = 0.004f * static_cast<float>(lev);
+    const float dlon = 0.009f * static_cast<float>(lev);
     r.values.push_back(
-      ObsValue{1, 100000.0f - 900.0f * static_cast<float>(lev), 0, z});
+      ObsValue{
+        1, 100000.0f - 900.0f * static_cast<float>(lev), 0, z, dlat, dlon});
     r.values.push_back(
-      ObsValue{2, 300.0f - 0.6f * static_cast<float>(lev), 0, z});
+      ObsValue{2, 300.0f - 0.6f * static_cast<float>(lev), 0, z, dlat, dlon});
   }
   ObsSegmentWriter w(snd, b);
   w.add_report(r);
@@ -531,6 +538,11 @@ TEST(segment_profile_levels)
   CHECK(
     v.values.height_m(199) == 357.0f + 150.0f * 99 &&
     v.values.var_code(199) == 2);
+  CHECK(v.values.dlat_deg(0) == 0.0f && v.values.dlon_deg(0) == 0.0f);
+  CHECK(v.values.dlat_deg(199) == 0.004f * 99.0f);
+  CHECK(v.values.dlon_deg(199) == 0.009f * 99.0f);
+  // The sounding is indexed once, at its launch position.
+  CHECK(seg->tree().size() == 1);
 }
 
 TEST(segment_empty)
@@ -580,6 +592,16 @@ TEST(writer_validation)
   CHECK(rejects([](ObsReport& r) { r.values = {ObsValue{1, NAN}}; }));
   CHECK(
     rejects([](ObsReport& r) { r.values = {ObsValue{1, 1.0f, 0, INFINITY}}; }));
+  CHECK(rejects([](ObsReport& r)
+                { r.values = {ObsValue{1, 1.0f, 0, NAN, NAN, 0.0f}}; }));
+  CHECK(rejects([](ObsReport& r)
+                { r.values = {ObsValue{1, 1.0f, 0, NAN, 0.0f, INFINITY}}; }));
+  CHECK(rejects(
+    [](ObsReport& r)
+    {
+      r.lat_deg = 89.5f;  // offset would put the value past the pole
+      r.values = {ObsValue{1, 1.0f, 0, NAN, 1.0f, 0.0f}};
+    }));
   CHECK(rejects([](ObsReport& r) { r.values.resize(65536); }));
   CHECK(w.size() == 0);  // rejected reports leave no trace
   CHECK(w.add_report(ok) == 0);
@@ -649,6 +671,8 @@ TEST(segment_rejects_consistent_crc_but_bad_structure)
   CHECK(patch(L.tree_pts, &inf, 4));  // non-finite point
   const float nan = NAN;
   CHECK(patch(L.vcol[obsseg::kVHeight], &nan, 4));  // non-finite value height
+  CHECK(patch(L.vcol[obsseg::kVDLat], &nan, 4));    // non-finite offset
+  CHECK(patch(L.vcol[obsseg::kVDLon], &nan, 4));
   // Sanity: re-checksumming an unmodified copy is accepted.
   const std::uint8_t same = good[L.raw];
   CHECK(!patch(L.raw, &same, 1));

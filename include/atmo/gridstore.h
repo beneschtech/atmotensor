@@ -21,7 +21,7 @@
 #include <mutex>
 #include <vector>
 
-#include "atmo/grid.hpp"
+#include "atmo/grid.h"
 
 namespace atmo
 {

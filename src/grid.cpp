@@ -1,11 +1,11 @@
-#include "atmo/grid.hpp"
+#include "atmo/grid.h"
 
 #include <array>
 #include <cmath>
 #include <stdexcept>
 #include <utility>
 
-#include "atmo/geo.hpp"
+#include "atmo/geo.h"
 
 namespace atmo
 {

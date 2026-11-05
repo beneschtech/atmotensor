@@ -5,9 +5,9 @@
 #include <random>
 #include <vector>
 
-#include "atmo/geo.hpp"
-#include "atmo/kdtree.hpp"
-#include "lambert.hpp"
+#include "atmo/geo.h"
+#include "atmo/kdtree.h"
+#include "lambert.h"
 
 using namespace atmo;
 using Clock = std::chrono::steady_clock;

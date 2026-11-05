@@ -4,7 +4,7 @@ Own-hardware weather data engine. Customers query it; it stores gridded model
 data (GFS, RRFS, HRRR, ...) and observations (METAR/SYNOP, soundings, TAF,
 PIREP, ...) and answers point, flight-route and area-product queries. Name:
 AtmoTensor; C++ namespace `atmo`; planned mount `/atmotensor`. C++20, Linux,
-static library `libatmo` (.hpp declarations + src/*.cpp). Owner: Chris (C++ /
+static library `libatmo` (.h declarations + src/*.cpp). Owner: Chris (C++ /
 Qt / Symfony background, AIX-era storage instincts, wants to avoid
 third-party/hosted dependencies).
 
@@ -13,8 +13,9 @@ third-party/hosted dependencies).
 `docs/CONVENTIONS.md` (agreed 2026-11-05) is binding and overrides older
 code style: C++20; headers hold declarations only, with code in
 `src/*.cpp` (exceptions: trivial getters/setters, templates, vendored
-code); 80 columns; 2 spaces, no tabs; Allman braces everywhere; long
-signatures one parameter per line. `.clang-format` encodes the layout;
+code); headers are `.h`; f32 wherever precision allows (OpenCL), with
+documented exceptions; 80 columns; 2 spaces, no tabs; Allman braces
+everywhere; long signatures one parameter per line. `.clang-format` encodes the layout;
 run `clang-format -i` on every file you touch (never on `third_party/`).
 
 ## Build and test
@@ -27,40 +28,48 @@ CMake only (CLion); presets in CMakePresets.json: default, asan, ci.
     ./build-cmake/bench_kdtree; ./build-cmake/bench_grid
     # options: ATMO_SANITIZE ATMO_WERROR ATMO_BUILD_TESTS ATMO_BUILD_BENCH
 
-No Catch2/gtest: tests use the tiny harness in `tests/check.hpp` (TEST, CHECK,
+No Catch2/gtest: tests use the tiny harness in `tests/check.h` (TEST, CHECK,
 CHECK_NEAR; non-fatal). Keep new tests dependency-free. `-ffp-contract=off` is
 deliberate: tree results must stay bit-identical to the brute-force oracles.
 Run the asan preset after touching anything with pointers or file I/O.
 
+## Web app
+
+`../web` (Symfony 7.4) owns MySQL and its schema (Doctrine migrations). The
+engine never connects to MySQL: the web app exports reference data
+(source classes, stations, ...) as JSON files into `/atmotensor/config/`,
+and ingest publishes them through the manifest. Contract:
+`docs/design/05-reference-data.md` (D10).
+
 ## Layout
 
-Each `include/atmo/<name>.hpp` (declarations) has a `src/<name>.cpp`, except
-`kdtree.hpp` (templates only). CMake builds `libatmo` (target `atmo::atmo`)
+Each `include/atmo/<name>.h` (declarations) has a `src/<name>.cpp`, except
+`kdtree.h` (templates only). CMake builds `libatmo` (target `atmo::atmo`)
 and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
 
-- `include/atmo/kdtree.hpp`   `KdTree4<T>` static flat-array 4D k-d tree;
+- `include/atmo/kdtree.h`   `KdTree4<T>` static flat-array 4D k-d tree;
   `KdTreeView4<T>` searches the same three arrays wherever they live (an
   mmap); KdTree4 delegates to it
-- `include/atmo/geo.hpp`      `embed()` (lat, lon, height, time) -> 4D point
-- `include/atmo/grid.hpp`     GridIdentity/GridKey, GridData, Grid
+- `include/atmo/geo.h`      `embed()` (lat, lon, height, time) -> 4D point
+- `include/atmo/grid.h`     GridIdentity/GridKey, GridData, Grid
   (locate/nearest), rotation
-- `include/atmo/gridstore.hpp` GridStore: immutable on-disk grid files
-- `include/atmo/crc32.hpp`    CRC-32 (zlib-compatible)
-- `include/atmo/source.hpp`   SourceClass (metric per source class),
+- `include/atmo/gridstore.h` GridStore: immutable on-disk grid files
+- `include/atmo/crc32.h`    CRC-32 (zlib-compatible)
+- `include/atmo/source.h`   SourceClass (metric per source class),
   SourceRegistry (JSON config)
-- `include/atmo/obs_segment.hpp` ObsSegmentWriter / ObsSegment: immutable
+- `include/atmo/obs_segment.h` ObsSegmentWriter / ObsSegment: immutable
   `*.seg` files (reports | values | raw | prebuilt tree), mmap'd, opened
   from the file without a rebuild
-- `include/atmo/stations.hpp` StationTableBuilder / StationTable: immutable
+- `include/atmo/stations.h` StationTableBuilder / StationTable: immutable
   station generations (typed ids with validity, position periods, stable
   refs); authoritative copy will live in MySQL (D10)
-- `src/fileio.hpp/.cpp` internal: publish_file (temp+fsync+link+dir fsync),
+- `src/fileio.h/.cpp` internal: publish_file (temp+fsync+link+dir fsync),
   MappedFile, align_up; shared by every immutable-file writer/reader
 - `third_party/`  vendored single headers (nlohmann/json 3.11.3, MIT); see
   its README.md. Included as `<nlohmann/json.hpp>` via a SYSTEM include
   path. Don't edit or reformat vendored files.
-- `tests/`  harness (`check.hpp/.cpp`), brute-force oracles,
-  `lambert.hpp/.cpp` (synthetic projected grid; test scaffolding only)
+- `tests/`  harness (`check.h/.cpp`), brute-force oracles,
+  `lambert.h/.cpp` (synthetic projected grid; test scaffolding only)
 - `bench/`  kdtree and gridstore timings
 
 ## Design decisions (settled - don't relitigate without a reason)

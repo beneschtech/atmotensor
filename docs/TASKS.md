@@ -12,7 +12,7 @@ unless Chris asks. If the spec is ambiguous or seems wrong, add an entry to
 Status legend: [ ] todo, [~] in progress, [x] done.
 
 - [x] T0  KdTree4, embed(), Grid, GridStore (see CLAUDE.md)
-- [x] T1  Source classes + config. `include/atmo/source.hpp`: `SourceClass`
+- [x] T1  Source classes + config. `include/atmo/source.h`: `SourceClass`
       {name, bucket_seconds, L_km, tau_seconds, vertical_scale, retain_seconds},
       `lambda()` = L_km / tau_seconds, `Embedding make_embedding(bucket_start)`,
       JSON load/validate. Vendor a single-header JSON parser under
@@ -28,16 +28,26 @@ Status legend: [ ] todo, [~] in progress, [x] done.
 - [ ] T4  `ObsIndex`: visible-version knn/radius/corridor across segments and
       buckets (01-obs-store.md). Acceptance tests 3, 4; plus a randomized test
       against a brute-force oracle that implements "latest version wins".
+      Segments whose stored metric differs from the current source class get
+      their tree rebuilt in RAM (Q5b, 05-reference-data.md); test it.
 - [ ] T5  Manifest + snapshot + publisher lock (02-...md). Acceptance tests
       1-4. Use fork() or a second process for the lock test.
+- [ ] T5b Reference-data import (05-reference-data.md): watch config/,
+      validate sources.json and stations.json, keep the previous version on
+      error, publish through the manifest (source classes copied into it;
+      stations as the next generation). Provisional-station write-back after
+      Q7 is decided.
 - [ ] T6  Retention + gc (expire buckets/runs, grace-period unlink,
       `gc()` of unreferenced files). Tests with fake clocks.
 - [ ] T7  Field file write/read (03-field-tiles.md) + `sample()` bilinear
       including periodic halo. Acceptance tests 1-4.
 - [ ] T8  Raw journal + replay (02-...md acceptance test 5), group commit.
+- [ ] T8b Variable registry (Q4): checked-in registry file, generator for
+      `include/atmo/variables.h` (constants + names + SI units), ~25
+      surface/upper-air variables to start; codes never reused.
 - [ ] T9  Query engine library: `point()` combining Grid::locate, FieldFile
       sample (space, time, log-p), ObsIndex; unit tests on synthetic data.
-- [ ] T10 FastCGI responder library (`include/atmo/fcgi.hpp`, spec and tests
+- [ ] T10 FastCGI responder library (`include/atmo/fcgi.h`, spec and tests
       in 04-query-api.md "FastCGI front end"), then the query daemon skeleton:
       /healthz, /v1/meta, /v1/point over T9. Can start independently of T2-T9
       using a stub handler. Provide an example nginx config under `deploy/`.

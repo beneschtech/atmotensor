@@ -10,11 +10,12 @@
 //   [0, 4096)  header page: SegHeader at 0, rest zero
 //   reports    n_reports rows, struct-of-arrays:
 //                report_key u64, receipt_seq u64, receipt_time_ms i64,
-//                obs_time i64, lat f64, lon f64, height_m f32,
+//                obs_time i64, lat f32, lon f32, height_m f32,
 //                station_ref u32, flags u16, n_values u16, first_value u32,
 //                raw_off u64, raw_len u32
 //   values     n_values rows, contiguous per report:
-//                var_code u16, value f32, qc u16, height_m f32
+//                var_code u16, value f32, qc u16, height_m f32,
+//                dlat_deg f32, dlon_deg f32
 //   raw        raw message bytes, stored once per report
 //   tree       prebuilt KdTree4<float>: points float[4][n], ids u32[n],
 //                axes u8[n]; ids are report row indices.  Points are
@@ -28,6 +29,14 @@
 // are geometric, not geopotential: ingest converts reported geopotential
 // heights, and derives heights for pressure-only levels (e.g. from a recent
 // GRIB geopotential-height field), before calling add_report().
+//
+// Values also carry a horizontal offset (dlat_deg, dlon_deg) from the
+// report's position, for balloon drift: a sounding's upper levels sit tens
+// of km downwind of the launch site (Q3a).  0 for single-level reports.
+//
+// Numbers are f32 wherever the precision allows (docs/CONVENTIONS.md, for
+// OpenCL): f32 lat/lon resolve ~1.7 m.  Times stay i64 (f32 cannot hold
+// epoch seconds), ids and sequence numbers u64.
 //
 // Sealing: temp file in the target directory -> fsync -> link() to the final
 // name (fails if it exists, so a sealed file is never replaced) -> unlink temp
@@ -47,9 +56,9 @@
 #include <utility>
 #include <vector>
 
-#include "atmo/geo.hpp"
-#include "atmo/kdtree.hpp"
-#include "atmo/source.hpp"
+#include "atmo/geo.h"
+#include "atmo/kdtree.h"
+#include "atmo/source.h"
 
 namespace atmo
 {
@@ -66,6 +75,10 @@ struct ObsValue
   // Geometric height above MSL (m) of this value; NaN = the report's
   // height_m (single-level reports).  Stored finite on disk.
   float height_m = std::numeric_limits<float>::quiet_NaN();
+  // Horizontal offset of this value from the report's (lat, lon), degrees;
+  // 0 for single-level reports.
+  float dlat_deg = 0.0f;
+  float dlon_deg = 0.0f;
 };
 
 // One decoded report as handed to the writer.
@@ -75,8 +88,8 @@ struct ObsReport
   std::uint64_t receipt_seq = 0;  // orders versions; latest = max
   std::int64_t receipt_time_ms = 0;
   std::int64_t obs_time_s = 0;  // unix seconds, inside the segment's bucket
-  double lat_deg = 0.0;         // position at obs_time_s
-  double lon_deg = 0.0;
+  float lat_deg = 0.0f;         // position at obs_time_s
+  float lon_deg = 0.0f;
   float height_m = 0.0f;
   std::uint32_t station_ref = 0;  // 0 = none / mobile
   std::uint16_t flags = 0;
@@ -84,30 +97,36 @@ struct ObsReport
   std::string raw;               // original message bytes
 };
 
+// Pointers to the value columns of a segment (or of one report's slice).
+struct ValueColumns
+{
+  const std::uint16_t* var = nullptr;
+  const float* value = nullptr;
+  const std::uint16_t* qc = nullptr;
+  const float* height_m = nullptr;
+  const float* dlat_deg = nullptr;
+  const float* dlon_deg = nullptr;
+};
+
 // The values of one report, pointing into the mapped file.
 class ValuesView
 {
  public:
   ValuesView() = default;
-  ValuesView(
-    const std::uint16_t* var,
-    const float* value,
-    const std::uint16_t* qc,
-    const float* height_m,
-    std::size_t n);
+  // Rows [first, first + n) of `cols`.
+  ValuesView(const ValueColumns& cols, std::size_t first, std::size_t n);
 
   std::size_t size() const { return n_; }
   bool empty() const { return n_ == 0; }
-  std::uint16_t var_code(std::size_t k) const { return var_[k]; }
-  float value(std::size_t k) const { return value_[k]; }
-  std::uint16_t qc(std::size_t k) const { return qc_[k]; }
-  float height_m(std::size_t k) const { return height_[k]; }
+  std::uint16_t var_code(std::size_t k) const { return c_.var[k]; }
+  float value(std::size_t k) const { return c_.value[k]; }
+  std::uint16_t qc(std::size_t k) const { return c_.qc[k]; }
+  float height_m(std::size_t k) const { return c_.height_m[k]; }
+  float dlat_deg(std::size_t k) const { return c_.dlat_deg[k]; }
+  float dlon_deg(std::size_t k) const { return c_.dlon_deg[k]; }
 
  private:
-  const std::uint16_t* var_ = nullptr;
-  const float* value_ = nullptr;
-  const std::uint16_t* qc_ = nullptr;
-  const float* height_ = nullptr;
+  ValueColumns c_;
   std::size_t n_ = 0;
 };
 
@@ -119,8 +138,8 @@ struct ReportView
   std::uint64_t receipt_seq = 0;
   std::int64_t receipt_time_ms = 0;
   std::int64_t obs_time_s = 0;
-  double lat_deg = 0.0;
-  double lon_deg = 0.0;
+  float lat_deg = 0.0f;
+  float lon_deg = 0.0f;
   float height_m = 0.0f;
   std::uint32_t station_ref = 0;
   std::uint16_t flags = 0;
@@ -203,7 +222,7 @@ enum RCol
   kRawLen,
   kNumRCols
 };
-constexpr std::size_t kRColSize[kNumRCols] = {8, 8, 8, 8, 8, 8, 4,
+constexpr std::size_t kRColSize[kNumRCols] = {8, 8, 8, 8, 4, 4, 4,
                                               4, 2, 2, 4, 8, 4};
 
 // Value columns, in file order.
@@ -213,9 +232,11 @@ enum VCol
   kValue,
   kQc,
   kVHeight,
+  kVDLat,
+  kVDLon,
   kNumVCols
 };
-constexpr std::size_t kVColSize[kNumVCols] = {2, 4, 2, 4};
+constexpr std::size_t kVColSize[kNumVCols] = {2, 4, 2, 4, 4, 4};
 
 // Absolute file offsets of every section and column.
 struct Layout
@@ -265,7 +286,7 @@ class ObsSegmentWriter
   std::set<std::pair<std::uint64_t, std::uint64_t>> versions_;
   std::vector<std::uint64_t> key_, seq_;
   std::vector<std::int64_t> receipt_time_ms_, obs_time_s_;
-  std::vector<double> lat_deg_, lon_deg_;
+  std::vector<float> lat_deg_, lon_deg_;
   std::vector<float> height_m_;
   std::vector<std::uint32_t> station_;
   std::vector<std::uint16_t> flags_, nval_;
@@ -273,7 +294,7 @@ class ObsSegmentWriter
   std::vector<std::uint64_t> raw_off_;
   std::vector<std::uint32_t> raw_len_;
   std::vector<std::uint16_t> var_, qc_;
-  std::vector<float> value_, value_height_m_;
+  std::vector<float> value_, value_height_m_, value_dlat_deg_, value_dlon_deg_;
   std::vector<char> raw_;
 };
 
@@ -333,8 +354,9 @@ class ObsSegment
   const std::uint64_t* receipt_seqs() const { return seq_; }
   const std::int64_t* receipt_times_ms() const { return receipt_time_ms_; }
   const std::int64_t* obs_times_s() const { return obs_time_s_; }
-  const double* lats_deg() const { return lat_deg_; }
-  const double* lons_deg() const { return lon_deg_; }
+  const float* lats_deg() const { return lat_deg_; }
+  const float* lons_deg() const { return lon_deg_; }
+  const ValueColumns& value_columns() const { return vcols_; }
   const float* heights_m() const { return height_m_; }
   const std::uint32_t* station_refs() const { return station_; }
   const std::uint16_t* flags() const { return flags_; }
@@ -381,8 +403,8 @@ class ObsSegment
   const std::uint64_t* seq_ = nullptr;
   const std::int64_t* receipt_time_ms_ = nullptr;
   const std::int64_t* obs_time_s_ = nullptr;
-  const double* lat_deg_ = nullptr;
-  const double* lon_deg_ = nullptr;
+  const float* lat_deg_ = nullptr;
+  const float* lon_deg_ = nullptr;
   const float* height_m_ = nullptr;
   const std::uint32_t* station_ = nullptr;
   const std::uint16_t* flags_ = nullptr;
@@ -390,10 +412,7 @@ class ObsSegment
   const std::uint32_t* first_ = nullptr;
   const std::uint64_t* raw_off_ = nullptr;
   const std::uint32_t* raw_len_ = nullptr;
-  const std::uint16_t* var_ = nullptr;
-  const float* value_ = nullptr;
-  const std::uint16_t* qc_ = nullptr;
-  const float* value_height_m_ = nullptr;
+  ValueColumns vcols_;
   const char* raw_ = nullptr;
 };
 

@@ -1,4 +1,4 @@
-#include "check.hpp"
+#include "check.h"
 
 #include <cstdio>
 #include <exception>

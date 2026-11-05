@@ -1,4 +1,4 @@
-#include "atmo/obs_segment.hpp"
+#include "atmo/obs_segment.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -13,8 +13,8 @@
 #include <stdexcept>
 #include <type_traits>
 
-#include "atmo/crc32.hpp"
-#include "fileio.hpp"
+#include "atmo/crc32.h"
+#include "fileio.h"
 
 static_assert(
   __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
@@ -88,13 +88,17 @@ Layout::Layout(
 using namespace obsseg;
 
 ValuesView::ValuesView(
-  const std::uint16_t* var,
-  const float* value,
-  const std::uint16_t* qc,
-  const float* height_m,
+  const ValueColumns& cols,
+  std::size_t first,
   std::size_t n)
-    : var_(var), value_(value), qc_(qc), height_(height_m), n_(n)
+    : n_(n)
 {
+  c_.var = cols.var + first;
+  c_.value = cols.value + first;
+  c_.qc = cols.qc + first;
+  c_.height_m = cols.height_m + first;
+  c_.dlat_deg = cols.dlat_deg + first;
+  c_.dlon_deg = cols.dlon_deg + first;
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +159,13 @@ std::size_t ObsSegmentWriter::add_report(const ObsReport& r)
     {
       throw bad("infinite value height");
     }
+    const float lat = r.lat_deg + v.dlat_deg;
+    if (
+      !std::isfinite(v.dlat_deg) || !std::isfinite(v.dlon_deg) ||
+      !(lat >= -90.0f && lat <= 90.0f) || std::fabs(v.dlon_deg) > 360.0f)
+    {
+      throw bad("bad value position offset");
+    }
   }
   if (r.raw.size() > std::numeric_limits<std::uint32_t>::max())
   {
@@ -192,6 +203,8 @@ std::size_t ObsSegmentWriter::add_report(const ObsReport& r)
     value_.push_back(v.value);
     qc_.push_back(v.qc);
     value_height_m_.push_back(std::isnan(v.height_m) ? r.height_m : v.height_m);
+    value_dlat_deg_.push_back(v.dlat_deg);
+    value_dlon_deg_.push_back(v.dlon_deg);
   }
   raw_.insert(raw_.end(), r.raw.begin(), r.raw.end());
   return row;
@@ -240,6 +253,8 @@ SealedSegment ObsSegmentWriter::seal(const std::filesystem::path& path)
   put(L.vcol[kValue], value_);
   put(L.vcol[kQc], qc_);
   put(L.vcol[kVHeight], value_height_m_);
+  put(L.vcol[kVDLat], value_dlat_deg_);
+  put(L.vcol[kVDLon], value_dlon_deg_);
   put(L.raw, raw_);
   put(L.tree_pts, tree.points());
   put(L.tree_ids, tree.ids());
@@ -303,6 +318,7 @@ void ObsSegmentWriter::release()
   drop(lat_deg_), drop(lon_deg_), drop(height_m_), drop(station_);
   drop(flags_), drop(nval_), drop(first_), drop(raw_off_), drop(raw_len_);
   drop(var_), drop(qc_), drop(value_), drop(value_height_m_), drop(raw_);
+  drop(value_dlat_deg_), drop(value_dlon_deg_);
 }
 
 // ---------------------------------------------------------------------------
@@ -353,9 +369,7 @@ ReportView ObsSegment::report(std::size_t i) const
   v.station_ref = station_[i];
   v.flags = flags_[i];
   const std::size_t first = first_[i];
-  v.values = ValuesView(
-    var_ + first, value_ + first, qc_ + first, value_height_m_ + first,
-    nval_[i]);
+  v.values = ValuesView(vcols_, first, nval_[i]);
   v.raw = std::string_view(raw_ + raw_off_[i], raw_len_[i]);
   return v;
 }
@@ -476,8 +490,8 @@ ObsSegment::ObsSegment(const std::filesystem::path& path, Verify verify)
   receipt_time_ms_ =
     reinterpret_cast<const std::int64_t*>(at(L.rcol[kRecvTime]));
   obs_time_s_ = reinterpret_cast<const std::int64_t*>(at(L.rcol[kObsTime]));
-  lat_deg_ = reinterpret_cast<const double*>(at(L.rcol[kLat]));
-  lon_deg_ = reinterpret_cast<const double*>(at(L.rcol[kLon]));
+  lat_deg_ = reinterpret_cast<const float*>(at(L.rcol[kLat]));
+  lon_deg_ = reinterpret_cast<const float*>(at(L.rcol[kLon]));
   height_m_ = reinterpret_cast<const float*>(at(L.rcol[kHeight]));
   station_ = reinterpret_cast<const std::uint32_t*>(at(L.rcol[kStation]));
   flags_ = reinterpret_cast<const std::uint16_t*>(at(L.rcol[kFlags]));
@@ -485,10 +499,12 @@ ObsSegment::ObsSegment(const std::filesystem::path& path, Verify verify)
   first_ = reinterpret_cast<const std::uint32_t*>(at(L.rcol[kFirst]));
   raw_off_ = reinterpret_cast<const std::uint64_t*>(at(L.rcol[kRawOff]));
   raw_len_ = reinterpret_cast<const std::uint32_t*>(at(L.rcol[kRawLen]));
-  var_ = reinterpret_cast<const std::uint16_t*>(at(L.vcol[kVar]));
-  value_ = reinterpret_cast<const float*>(at(L.vcol[kValue]));
-  qc_ = reinterpret_cast<const std::uint16_t*>(at(L.vcol[kQc]));
-  value_height_m_ = reinterpret_cast<const float*>(at(L.vcol[kVHeight]));
+  vcols_.var = reinterpret_cast<const std::uint16_t*>(at(L.vcol[kVar]));
+  vcols_.value = reinterpret_cast<const float*>(at(L.vcol[kValue]));
+  vcols_.qc = reinterpret_cast<const std::uint16_t*>(at(L.vcol[kQc]));
+  vcols_.height_m = reinterpret_cast<const float*>(at(L.vcol[kVHeight]));
+  vcols_.dlat_deg = reinterpret_cast<const float*>(at(L.vcol[kVDLat]));
+  vcols_.dlon_deg = reinterpret_cast<const float*>(at(L.vcol[kVDLon]));
   raw_ = reinterpret_cast<const char*>(at(L.raw));
 
   // Structure: value slices contiguous, raw slices in range, times in the
@@ -523,9 +539,11 @@ ObsSegment::ObsSegment(const std::filesystem::path& path, Verify verify)
   }
   for (std::size_t k = 0; k < h_.n_values; ++k)
   {
-    if (!std::isfinite(value_height_m_[k]))
+    if (
+      !std::isfinite(vcols_.height_m[k]) ||
+      !std::isfinite(vcols_.dlat_deg[k]) || !std::isfinite(vcols_.dlon_deg[k]))
     {
-      throw bad("non-finite value height");
+      throw bad("non-finite value height or offset");
     }
   }
 

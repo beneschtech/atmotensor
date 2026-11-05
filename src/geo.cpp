@@ -1,4 +1,4 @@
-#include "atmo/geo.hpp"
+#include "atmo/geo.h"
 
 namespace atmo
 {

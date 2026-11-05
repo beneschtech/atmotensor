@@ -9,8 +9,8 @@
 #include <string>
 #include <vector>
 
-#include "atmo/stations.hpp"
-#include "check.hpp"
+#include "atmo/stations.h"
+#include "check.h"
 
 using namespace atmo;
 namespace fs = std::filesystem;
@@ -72,7 +72,10 @@ StationPeriod at(
   std::int64_t from_s = kTimeMin,
   std::int64_t to_s = kTimeMax)
 {
-  return StationPeriod{from_s, to_s, lat_deg, lon_deg, elev_m};
+  // Positions are stored as f32; the literals in the tests are doubles.
+  return StationPeriod{
+    from_s, to_s, static_cast<float>(lat_deg), static_cast<float>(lon_deg),
+    elev_m};
 }
 
 // Oklahoma City: ICAO + WMO, re-surveyed in 2020 (elevation changed).
@@ -442,6 +445,85 @@ TEST(stations_random_lookup_matches_brute_force)
     ok = ok && t->by_ref(pick.ref)->to_station() == pick;
   }
   CHECK(ok);
+}
+
+// Q7: the web app assigns refs in [1, 2^31), ingest assigns provisional
+// refs in [2^31, 2^32); each range only grows; provisional stations keep
+// their ref when confirmed or merged.
+TEST(stations_ref_ranges_and_merge)
+{
+  TempDir td;
+  auto provisional = [](const char* icao)
+  {
+    Station s;
+    s.name = std::string(icao) + " (provisional)";
+    s.flags = kStationProvisional;
+    s.ids = {bind(StationIdType::icao, icao)};
+    return s;
+  };
+  StationTableBuilder b1;
+  const std::uint32_t okc_ref = b1.add(okc());
+  const std::uint32_t p1 = b1.add(provisional("KZZA"));
+  const std::uint32_t p2 = b1.add(provisional("KZZB"));
+  const std::uint32_t oun_ref = b1.add(oun());
+  Station p10 = provisional("KZZE");
+  p10.ref = kProvisionalRefBase + 10;  // explicit, leaving a gap
+  CHECK(b1.add(p10) == kProvisionalRefBase + 10);
+  CHECK(okc_ref == 1 && oun_ref == 2);
+  CHECK(p1 == kProvisionalRefBase && p2 == kProvisionalRefBase + 1);
+  CHECK(b1.max_ref() == 2);
+  CHECK(b1.max_provisional_ref() == kProvisionalRefBase + 10);
+  const auto g1 = StationTable::open(b1.seal(td.p));
+  CHECK(g1->max_ref() == 2);
+  CHECK(g1->max_provisional_ref() == kProvisionalRefBase + 10);
+  CHECK(g1->by_ref(p1) && (g1->by_ref(p1)->flags() & kStationProvisional));
+  // Iteration is in ref order: web-app range first.
+  CHECK(g1->station(0).ref() == 1 && g1->station(3).ref() == p2);
+  CHECK(g1->station(4).ref() == kProvisionalRefBase + 10);
+
+  StationTableBuilder b2(*g1);
+  // Confirm p1: the flag goes, the ref stays.
+  Station confirmed = *b2.find(p1);
+  confirmed.flags = 0;
+  confirmed.name = "Confirmed field";
+  confirmed.periods = {at(36.1, -97.1, 300.0f)};
+  b2.update(confirmed);
+  // p2 turns out to be OKC under a wrong code: keep it as an alias.
+  Station alias = *b2.find(p2);
+  alias.merged_into = okc_ref;
+  b2.update(alias);
+  // Both ranges keep growing independently.
+  CHECK(b2.add(provisional("KZZC")) == kProvisionalRefBase + 11);
+  Station web = oun();
+  web.ids = {bind(StationIdType::icao, "KPWA")};
+  web.ref = 3;  // explicit ref from the web app's export
+  CHECK(b2.add(web) == 3);
+  web.ids = {bind(StationIdType::icao, "KHBR")};
+  web.ref = 2;  // exists
+  CHECK(throws<std::invalid_argument>([&] { b2.add(web); }));
+  Station late = provisional("KZZD");
+  late.ref = kProvisionalRefBase + 5;  // never used, but below the mark
+  CHECK(throws<std::invalid_argument>([&] { b2.add(late); }));
+  const auto g2 = StationTable::open(b2.seal(td.p));
+  CHECK(g2->max_ref() == 3);
+  CHECK(g2->max_provisional_ref() == kProvisionalRefBase + 11);
+  CHECK(g2->by_ref(p1)->flags() == 0 && g2->by_ref(p1)->n_periods() == 1);
+  CHECK(g2->by_ref(p2)->merged_into() == okc_ref);
+  CHECK(g2->by_ref(p2)->to_station().merged_into == okc_ref);
+  CHECK(g2->by_ref(okc_ref)->merged_into() == 0);
+
+  // Invalid aliases are refused at seal.
+  auto seal_fails = [&](std::uint32_t from, std::uint32_t to)
+  {
+    StationTableBuilder b(*g2);
+    Station s = *b.find(from);
+    s.merged_into = to;
+    b.update(s);
+    return throws<std::invalid_argument>([&] { b.seal(td.p / "x"); });
+  };
+  CHECK(seal_fails(oun_ref, oun_ref));  // itself
+  CHECK(seal_fails(oun_ref, 999));      // no such station
+  CHECK(seal_fails(oun_ref, p2));       // p2 is itself an alias: no chains
 }
 
 int main()

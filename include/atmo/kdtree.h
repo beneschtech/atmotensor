@@ -1,7 +1,7 @@
 // atmo::KdTree4 -- static, flat-array 4D k-d tree.
 //
 // Points are 4 coordinates in a single Euclidean metric.  For AtmoTensor the
-// coordinates come from atmo::embed() (geo.hpp): x,y,z in km on a sphere of
+// coordinates come from atmo::embed() (geo.h): x,y,z in km on a sphere of
 // radius R + scaled height, and w = lambda * (t - t0).  The per-source time
 // weighting (lambda) is therefore baked into the coordinates, and one tree is
 // built per source class.

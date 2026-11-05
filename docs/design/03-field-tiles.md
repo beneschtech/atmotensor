@@ -24,7 +24,7 @@ decision, not "everything in the GRIB".
 
 ## File layout
 
-Same conventions as `gridstore.hpp`: 4 KiB header page (magic `ATFLD001`,
+Same conventions as `gridstore.h`: 4 KiB header page (magic `ATFLD001`,
 version, model, run time, forecast hour, `grid_key`, tile size, halo, field
 count, section offsets, CRCs), then:
 - field directory: per field `param_id u16` (internal registry, SI units),

@@ -7,17 +7,18 @@
 // distance.  Each class gets its own trees (never mix lambdas in one tree);
 // the embedding's t0 is the start of the time bucket the tree covers.
 //
-// Config is JSON (SourceRegistry::from_file / from_text / from_json), either a
-// bare array of class objects or an object with a "sources" array (other
-// top-level keys are left for other loaders):
+// The source classes are edited in the web app and stored in MySQL (D10);
+// Symfony exports them as config/sources.json
+// (docs/design/05-reference-data.md), read with SourceRegistry::from_file:
 //
-//   { "sources": [ { "name": "metar", "bucket_seconds": 3600, "L_km": 100,
+//   { "format": "atmo-sources", "version": 1, "exported_at": "...",
+//     "sources": [ { "name": "metar", "bucket_seconds": 3600, "L_km": 100,
 //                    "tau_seconds": 3600, "vertical_scale": 10,
 //                    "retain_seconds": 259200 } ] }
 //
-// For a built-in class name (see defaults()) omitted fields take the built-in
-// value; any other name must give every field.  Unknown keys are rejected
-// (they are almost always typos).  Every error is std::invalid_argument.
+// Every field of a class is required and unknown keys are rejected (they
+// are almost always typos); other top-level keys are ignored.  Every error
+// is std::invalid_argument.
 #pragma once
 
 #include <cstdint>
@@ -28,7 +29,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "atmo/geo.hpp"
+#include "atmo/geo.h"
 
 namespace atmo
 {
@@ -62,11 +63,7 @@ struct SourceClass
 
   nlohmann::json to_json() const;
 
-  // `base` supplies values for omitted fields (nullptr: all fields required).
-  static SourceClass from_json(
-    const nlohmann::json& j,
-    const SourceClass* base);
-  // Uses the built-in defaults for omitted fields when the name is built in.
+  // One class object; every field required.
   static SourceClass from_json(const nlohmann::json& j);
   static SourceClass from_text(std::string_view json_text);
 };
@@ -78,12 +75,17 @@ class SourceRegistry
   SourceRegistry() = default;
   explicit SourceRegistry(std::vector<SourceClass> classes);
 
-  // Suggested starting values from 01-obs-store.md (tune later).
+  static constexpr const char* kFormat = "atmo-sources";
+  static constexpr int kVersion = 1;
+
+  // Suggested starting values from 01-obs-store.md (tune later).  The same
+  // values seed the MySQL table; here they serve tests and tools.
   static SourceRegistry defaults();
 
+  // A whole export: {"format": "atmo-sources", "version": 1, "sources": [...]}
   static SourceRegistry from_json(const nlohmann::json& j);
   static SourceRegistry from_text(std::string_view json_text);
-  // Reads e.g. config/atmo.json.
+  // Reads config/sources.json.
   static SourceRegistry from_file(const std::filesystem::path& path);
 
   nlohmann::json to_json() const;

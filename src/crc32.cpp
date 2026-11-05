@@ -1,4 +1,4 @@
-#include "atmo/crc32.hpp"
+#include "atmo/crc32.h"
 
 #include <array>
 
