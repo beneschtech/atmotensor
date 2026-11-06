@@ -1,4 +1,4 @@
-#include "atmo/source.hpp"
+#include "atmo/source.h"
 
 #include <cmath>
 #include <cstdint>
@@ -120,9 +120,7 @@ nlohmann::json SourceClass::to_json() const
     {"retain_seconds", retain_seconds}};
 }
 
-SourceClass SourceClass::from_json(
-  const nlohmann::json& j,
-  const SourceClass* base)
+SourceClass SourceClass::from_json(const nlohmann::json& j)
 {
   if (!j.is_object())
   {
@@ -134,10 +132,6 @@ SourceClass SourceClass::from_json(
     throw std::invalid_argument("source class needs a string \"name\"");
   }
   SourceClass s;
-  if (base)
-  {
-    s = *base;
-  }
   s.name = name_it->get<std::string>();
   auto bad = [&](const std::string& why)
   { return std::invalid_argument("source class '" + s.name + "': " + why); };
@@ -161,11 +155,7 @@ SourceClass SourceClass::from_json(
     auto it = j.find(key);
     if (it == j.end())
     {
-      if (!base)
-      {
-        throw bad(std::string("missing \"") + key + "\"");
-      }
-      return;
+      throw bad(std::string("missing \"") + key + "\"");
     }
     if (!it->is_number_integer())
     {
@@ -185,11 +175,7 @@ SourceClass SourceClass::from_json(
     auto it = j.find(key);
     if (it == j.end())
     {
-      if (!base)
-      {
-        throw bad(std::string("missing \"") + key + "\"");
-      }
-      return;
+      throw bad(std::string("missing \"") + key + "\"");
     }
     if (!it->is_number())
     {
@@ -204,21 +190,6 @@ SourceClass SourceClass::from_json(
   get_int("retain_seconds", s.retain_seconds);
   s.validate();
   return s;
-}
-
-SourceClass SourceClass::from_json(const nlohmann::json& j)
-{
-  const SourceRegistry d = SourceRegistry::defaults();
-  const SourceClass* base = nullptr;
-  if (j.is_object())
-  {
-    auto it = j.find("name");
-    if (it != j.end() && it->is_string())
-    {
-      base = d.find(it->get<std::string>());
-    }
-  }
-  return from_json(j, base);
 }
 
 SourceClass SourceClass::from_text(std::string_view json_text)
@@ -253,23 +224,31 @@ SourceRegistry SourceRegistry::defaults()
 
 SourceRegistry SourceRegistry::from_json(const nlohmann::json& j)
 {
-  const nlohmann::json* arr = &j;
-  if (j.is_object())
+  if (!j.is_object())
   {
-    auto it = j.find("sources");
-    if (it == j.end())
-    {
-      throw std::invalid_argument("config: no \"sources\" key");
-    }
-    arr = &*it;
+    throw std::invalid_argument("sources export: not a JSON object");
   }
-  if (!arr->is_array())
+  auto fmt = j.find("format");
+  if (fmt == j.end() || !fmt->is_string() || *fmt != kFormat)
   {
-    throw std::invalid_argument("config: sources must be an array");
+    throw std::invalid_argument(
+      std::string("sources export: \"format\" must be \"") + kFormat + "\"");
+  }
+  auto ver = j.find("version");
+  if (ver == j.end() || !ver->is_number_integer() || *ver != kVersion)
+  {
+    throw std::invalid_argument(
+      "sources export: unsupported \"version\" (want " +
+      std::to_string(kVersion) + ")");
+  }
+  auto arr = j.find("sources");
+  if (arr == j.end() || !arr->is_array())
+  {
+    throw std::invalid_argument("sources export: \"sources\" must be an array");
   }
   if (arr->empty())
   {
-    throw std::invalid_argument("config: no source classes");
+    throw std::invalid_argument("sources export: no source classes");
   }
   std::vector<SourceClass> v;
   for (const auto& e : *arr)
@@ -310,7 +289,8 @@ nlohmann::json SourceRegistry::to_json() const
   {
     arr.push_back(s.to_json());
   }
-  return nlohmann::json{{"sources", std::move(arr)}};
+  return nlohmann::json{
+    {"format", kFormat}, {"version", kVersion}, {"sources", std::move(arr)}};
 }
 
 const SourceClass* SourceRegistry::find(std::string_view name) const

@@ -2,7 +2,7 @@
 
 ## Directory layout (`/atmotensor`, configurable root)
 
-    grids/<key>.grid                         gridstore.hpp (done)
+    grids/<key>.grid                         gridstore.h (done)
     stations/stations-<gen>.tbl
     obs/<source>/<bucket_start>/<seg-id>.seg
     fields/<model>/<run YYYYmmddHH>/f<fhr:03>.fld
@@ -10,13 +10,15 @@
     manifest/MANIFEST-<seq:016x>.json        immutable
     manifest/CURRENT                         tiny file: seq + CRC, replaced by rename
     manifest/LOCK                            flock held by the one publisher
-    config/atmo.json
+    config/sources.json                      exported by the web app (05-reference-data.md)
+    config/stations.json                     exported by the web app
     tmp/                                     staging; anything here is garbage after a crash
 
 ## Manifest
 
 JSON, immutable once written. Contains: `seq`, `created_at`, `next_receipt_seq`,
-station generation, and entries for grids, field files (model, run, fhr,
+the active source classes (copied from config/sources.json, so a snapshot
+records the metric it uses), station generation, and entries for grids, field files (model, run, fhr,
 grid_key, path, header CRC), obs segments (source, bucket, path, receipt_seq
 min/max, report count, header CRC). Sized for ~thousands of entries.
 

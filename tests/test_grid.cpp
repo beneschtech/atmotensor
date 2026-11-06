@@ -9,12 +9,12 @@
 #include <string>
 #include <vector>
 
-#include "atmo/crc32.hpp"
-#include "atmo/geo.hpp"
-#include "atmo/grid.hpp"
-#include "atmo/gridstore.hpp"
-#include "check.hpp"
-#include "lambert.hpp"
+#include "atmo/crc32.h"
+#include "atmo/geo.h"
+#include "atmo/grid.h"
+#include "atmo/gridstore.h"
+#include "check.h"
+#include "lambert.h"
 
 using namespace atmo;
 namespace fs = std::filesystem;
@@ -326,7 +326,7 @@ TEST(locate_global_periodic_latlon)
     if (c)
     {
       CHECK(c->i == 359 && c->j == 100);
-      CHECK_NEAR(c->fx, 0.5, 2e-3);  // flat-cell approximation, see grid.hpp
+      CHECK_NEAR(c->fx, 0.5, 2e-3);  // flat-cell approximation, see grid.h
       CHECK_NEAR(c->fy, 0.25, 2e-3);
     }
   }

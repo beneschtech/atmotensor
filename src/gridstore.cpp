@@ -1,4 +1,4 @@
-#include "atmo/gridstore.hpp"
+#include "atmo/gridstore.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -12,7 +12,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "atmo/crc32.hpp"
+#include "atmo/crc32.h"
 
 static_assert(
   __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,

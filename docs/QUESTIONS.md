@@ -25,36 +25,40 @@ Q3 [answered] Profile (sounding) storage. Decision (Chris): levels are a
     add_report(). The tree still indexes reports (one point per sounding at
     its launch position/time). Tests: `segment_profile_levels`,
     `segment_round_trip`.
-    Follow-ups (open, not blocking): (a) balloon drift - levels sit tens of km
+    Follow-ups, answered 2026-11-05: (a) yes - values carry dlat_deg /
+    dlon_deg f32 offsets from the report position (0 for single-level
+    reports); (b) no - the tree indexes the sounding once, queries
+    interpolate within the profile by height; a separate level tree can be
+    added later if corridor search needs it. Original text: (a) balloon drift - levels sit tens of km
     downwind of the launch site at the top; add per-level lat/lon (or a drift
     offset) now while the format is unreleased? (b) should profile levels
     ever be individual tree points (e.g. corridor search for a flight route at
     altitude), or does T4 always find the sounding and then interpolate
-    within the profile by height? 01-obs-store.md "Data model" still
-    mentions a `level` column - architect to update.
+    within the profile by height?
 
-Q4 [open] Variable registry (`var_code`, `param_id`): who owns it and where
-    does it live? Proposal: `docs/design/variables.md` + a generated header;
-    start with ~25 common surface/upper-air variables.
-Q5 [open] Small choices made in T1/T2 that the spec did not pin down; all
-    cheap to change, please confirm or overrule:
-    a) Config: a class whose name is built in (metar, synop, sounding, pirep,
-       aircraft) may omit fields, which take the built-in value; any other
-       name must give every field. Unknown keys are errors. Names must match
-       `[a-z][a-z0-9_-]*`, <= 31 chars (they become directory names and fit
-       the 32-byte name field in segment headers). vertical_scale defaults
-       to 10 for every built-in class (only the metar example gave a value).
-    b) Segment headers store the full metric (name, bucket_seconds, L_km,
-       tau_seconds, vertical_scale, Earth radius); `ObsSegment::matches(cls)`
-       tells T4 whether a segment's prebuilt tree is valid for the current
-       config. Proposal for T4: a mismatching segment is an error at adoption
-       (or rebuilt in RAM), never silently mixed.
-    c) Sealing uses link() to the final name instead of rename(), so a
-       sealed file can never be replaced (EEXIST -> error). Directories
+Q4 [answered 2026-11-05] Variable registry (`var_code`): the source of
+    truth is a checked-in file in this repo (docs/design/variables.md or a
+    CSV next to it) with a generated C++ header of constants; the web app
+    imports it into MySQL for display and joins. Codes are never reused or
+    renumbered (they are written into segment files). Unlike stations it is
+    not edited in MySQL, because decoders need the codes at compile time.
+    Start with ~25 common surface/upper-air variables. Task: T8b.
+Q5 Small choices made in T1/T2 that the spec did not pin down.
+    a) [answered 2026-11-05] Source-class config lives in MySQL, edited in
+       the web app, exported as config/sources.json (D10,
+       05-reference-data.md). The loader is now strict: format/version
+       marker required, every field required, unknown keys rejected, names
+       `[a-z][a-z0-9_-]*` <= 31 chars. Built-in defaults are seed data.
+    b) [answered 2026-11-05] A segment whose stored metric differs from the
+       current source class is rebuilt in RAM with the current metric when
+       a snapshot is adopted (not refused, not mixed). For T4.
+    c) [answered 2026-11-05: keep] Sealing uses link() to the final name instead of rename(), so
+       a sealed file can never be replaced (EEXIST -> error). Directories
        created on the way are fsynced too.
-    d) Rows keep insertion order (tree ids = row index); report_key is
-       supplied by the caller - no hashing helper yet (belongs to ingest,
-       needs the report_type definition).
+    d) [answered 2026-11-05: keep; the report_key hash is defined in
+       ingest, T11] Rows keep insertion order (tree ids = row index); report_key
+       is supplied by the caller - no hashing helper yet (belongs to
+       ingest, needs the report_type definition).
 Q6 [answered] Station table and reference data (2026-11-05, in the
     implementation session). Decisions: MySQL holds the authoritative
     reference data (D10) and the engine reads exported immutable
@@ -62,7 +66,23 @@ Q6 [answered] Station table and reference data (2026-11-05, in the
     validity intervals; unknown stations become provisional entries instead
     of being dropped; each generation is a full copy; a ref names the
     station, not a period; refs only grow (explicit refs must exceed the
-    previous max_ref). Implemented in T3. Open for later: the MySQL schema
-    (docs/design/schema.sql), the export job, and which client library
-    (MySQL Connector/C vs MariaDB Connector/C), as an optional dependency
-    like eccodes.
+    previous max_ref). Implemented in T3. Update: only the web app talks to
+    MySQL (D10, option B), so the engine needs no client library and the
+    schema is the web app's Doctrine migrations; the contract is
+    05-reference-data.md.
+Q7 [answered 2026-11-05] Ref allocation for provisional stations. Both the web app
+    (admin creates a station) and ingest (unknown station in a report)
+    create stations, and refs must never collide or be reused. Proposal:
+    disjoint ranges. The web app assigns refs in [1, 2^31); ingest assigns
+    provisional refs in [2^31, 2^32), counting up from its own high-water
+    mark kept in the manifest. A provisional station keeps its ref forever
+    (reports already point at it): confirming it clears the flag; if it
+    duplicates a real station it is marked as an alias of that ref (needs a
+    `merged_into` field). Ingest reports new provisional stations by writing
+    config/outbox/provisional-<seq>.json for the web app to import.
+    Consequence for T3: the "new refs must exceed max_ref" rule becomes per
+    range (the builder tracks both high-water marks).
+    Decision: disjoint ranges as proposed. Implemented: kProvisionalRefBase
+    = 2^31, max_ref() / max_provisional_ref(), Station::merged_into (target
+    must exist and not be merged itself). Test:
+    `stations_ref_ranges_and_merge`. The outbox file format is part of T5b.

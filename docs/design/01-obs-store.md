@@ -29,7 +29,7 @@ reports (one row per decoded report), struct-of-arrays:
 - `receipt_seq u64`  global monotonically increasing ingest sequence (persisted in the manifest). Orders versions: latest = max receipt_seq per report_key.
 - `receipt_time i64` unix milliseconds. For `as_of` by wall clock.
 - `obs_time i64`     unix seconds.
-- `lat f64, lon f64, height_m f32`  position AT observation time (mobile platforms differ per report).
+- `lat f32, lon f32, height_m f32`  position AT observation time (mobile platforms differ per report).
 - `station_ref u32`  index into the station table (0 = none/mobile).
 - `flags u16`        bit0 = correction/amendment, bit1 = decoder warnings; rest reserved.
 - `first_value u32, n_values u16`  slice of the values table.
@@ -43,12 +43,15 @@ values (struct-of-arrays, contiguous per report):
 raw: the original message bytes, stored ONCE per report; a dozen values point
 at it via the report row. Sounding profiles: one report whose values are a
 level-ordered profile: every value carries the geometric height of its
-level (`height_m`, metres above MSL), see Q3.
+level (`height_m`, metres above MSL) and its horizontal offset from the
+report position (`dlat_deg`, `dlon_deg` f32, balloon drift), see Q3. The
+tree indexes the sounding once, at its launch position and time; queries
+interpolate within the profile by height.
 
 ## Segment file (`*.seg`)
 
 Immutable, written by ingest: temp file -> fsync -> rename -> fsync dir ->
-then listed in a manifest. Same conventions as `gridstore.hpp` (4 KiB header
+then listed in a manifest. Same conventions as `gridstore.h` (4 KiB header
 page with magic `ATOBSG01`, version, source class, bucket start, counts,
 section offsets, per-section CRC-32, header CRC; 4 KiB-aligned sections).
 
@@ -84,7 +87,7 @@ return `ReportView` (position, times, values span, raw span, flags).
 
 ## Station table
 
-Implemented in T3 (`include/atmo/stations.hpp`); decisions D10 and Q6.
+Implemented in T3 (`include/atmo/stations.h`); decisions D10 and Q6.
 
 - Authoritative list in MySQL (D10); ingest exports a full copy as an
   immutable generation `stations/stations-<gen:016x>.tbl` referenced by the
@@ -92,7 +95,10 @@ Implemented in T3 (`include/atmo/stations.hpp`); decisions D10 and Q6.
 - `station_ref` (u32, > 0) identifies the station, not one of its periods,
   and is never reused: a generation contains every ref of the previous one
   and new refs are above its `max_ref` (MySQL AUTO_INCREMENT values or
-  assigned by the builder). 0 = no station.
+  assigned by the builder). 0 = no station. Two disjoint ranges (Q7): the
+  web app assigns [1, 2^31), ingest assigns provisional refs from 2^31 up;
+  a provisional station keeps its ref when confirmed or merged
+  (`merged_into`).
 - Identifiers are typed (icao, wmo, wigos, platform) and bound to a station
   for a validity interval; for one identifier the intervals never overlap
   across the table, so (identifier, time) names at most one station.

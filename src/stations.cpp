@@ -1,4 +1,4 @@
-#include "atmo/stations.hpp"
+#include "atmo/stations.h"
 
 #include <algorithm>
 #include <cmath>
@@ -7,8 +7,8 @@
 #include <stdexcept>
 #include <tuple>
 
-#include "atmo/crc32.hpp"
-#include "fileio.hpp"
+#include "atmo/crc32.h"
+#include "fileio.h"
 
 static_assert(
   __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
@@ -53,8 +53,8 @@ struct Header
   std::uint32_t version;
   std::uint32_t flags;  // reserved, 0
   std::uint64_t generation;
-  std::uint32_t max_ref;
-  std::uint32_t reserved0;
+  std::uint32_t max_ref;       // high-water mark of [1, 2^31)
+  std::uint32_t max_prov_ref;  // high-water mark of [2^31, 2^32), 0 = none
   std::uint64_t n_stations;
   std::uint64_t n_periods;
   std::uint64_t n_ids;
@@ -77,9 +77,10 @@ enum SCol
   kNIds,
   kNameOff,
   kNameLen,
+  kMerged,
   kNumSCols
 };
-constexpr std::size_t kSColSize[kNumSCols] = {4, 2, 4, 4, 4, 4, 4, 4};
+constexpr std::size_t kSColSize[kNumSCols] = {4, 2, 4, 4, 4, 4, 4, 4, 4};
 enum PCol
 {
   kFrom,
@@ -89,7 +90,7 @@ enum PCol
   kElev,
   kNumPCols
 };
-constexpr std::size_t kPColSize[kNumPCols] = {8, 8, 8, 8, 4};
+constexpr std::size_t kPColSize[kNumPCols] = {8, 8, 4, 4, 4};
 enum ICol
 {
   kType,
@@ -188,9 +189,9 @@ bool valid_id_value(StationIdType type, std::string_view v)
 bool valid_period(const StationPeriod& p)
 {
   return p.valid_from_s < p.valid_to_s && std::isfinite(p.lat_deg) &&
-         p.lat_deg >= -90.0 && p.lat_deg <= 90.0 && std::isfinite(p.lon_deg) &&
-         p.lon_deg >= -180.0 && p.lon_deg <= 360.0 &&
-         std::isfinite(p.elevation_m);
+         p.lat_deg >= -90.0f && p.lat_deg <= 90.0f &&
+         std::isfinite(p.lon_deg) && p.lon_deg >= -180.0f &&
+         p.lon_deg <= 360.0f && std::isfinite(p.elevation_m);
 }
 
 // Ordering of identifier bindings in the file.
@@ -281,7 +282,9 @@ StationTableBuilder::StationTableBuilder() = default;
 StationTableBuilder::StationTableBuilder(const StationTable& previous)
     : generation_(previous.generation() + 1),
       base_max_ref_(previous.max_ref()),
-      max_ref_(previous.max_ref())
+      base_max_prov_ref_(previous.max_provisional_ref()),
+      max_ref_(previous.max_ref()),
+      max_prov_ref_(previous.max_provisional_ref())
 {
   for (std::size_t i = 0; i < previous.size(); ++i)
   {
@@ -300,20 +303,44 @@ std::uint32_t StationTableBuilder::add(Station s)
   validate_station(s);
   if (s.ref == 0)
   {
-    if (max_ref_ == std::numeric_limits<std::uint32_t>::max())
+    if (s.flags & kStationProvisional)
     {
-      throw std::length_error("StationTableBuilder: out of refs");
+      if (max_prov_ref_ == std::numeric_limits<std::uint32_t>::max())
+      {
+        throw std::length_error("StationTableBuilder: out of provisional refs");
+      }
+      s.ref = max_prov_ref_ == 0 ? kProvisionalRefBase : max_prov_ref_ + 1;
     }
-    s.ref = max_ref_ + 1;
+    else
+    {
+      if (max_ref_ + 1 >= kProvisionalRefBase)
+      {
+        throw std::length_error("StationTableBuilder: out of refs");
+      }
+      s.ref = max_ref_ + 1;
+    }
   }
-  else if (s.ref <= base_max_ref_ || stations_.count(s.ref) != 0)
+  else
   {
-    throw std::invalid_argument(
-      "StationTableBuilder: ref " + std::to_string(s.ref) +
-      " already used (refs are never reused)");
+    const bool prov = s.ref >= kProvisionalRefBase;
+    const std::uint32_t floor = prov ? base_max_prov_ref_ : base_max_ref_;
+    if (s.ref <= floor || stations_.count(s.ref) != 0)
+    {
+      throw std::invalid_argument(
+        "StationTableBuilder: ref " + std::to_string(s.ref) +
+        " already used or below its range's high-water mark (refs are "
+        "never reused)");
+    }
   }
   const std::uint32_t ref = s.ref;
-  max_ref_ = std::max(max_ref_, ref);
+  if (ref >= kProvisionalRefBase)
+  {
+    max_prov_ref_ = std::max(max_prov_ref_, ref);
+  }
+  else
+  {
+    max_ref_ = std::max(max_ref_, ref);
+  }
   stations_.emplace(ref, std::move(s));
   return ref;
 }
@@ -357,12 +384,30 @@ std::filesystem::path StationTableBuilder::seal(
     std::int64_t from_s, to_s;
     std::uint32_t value_off;
   };
+  for (const auto& [r, s] : stations_)
+  {
+    if (s.merged_into == 0)
+    {
+      continue;
+    }
+    auto target = stations_.find(s.merged_into);
+    if (
+      s.merged_into == r || target == stations_.end() ||
+      target->second.merged_into != 0)
+    {
+      throw std::invalid_argument(
+        "StationTableBuilder: station " + std::to_string(r) + " merged_into " +
+        std::to_string(s.merged_into) +
+        " must name another existing, unmerged station");
+    }
+  }
+
   std::string strings;
   std::vector<std::uint32_t> ref, first_period, n_periods, first_id, n_ids;
-  std::vector<std::uint32_t> name_off, name_len;
+  std::vector<std::uint32_t> name_off, name_len, merged;
   std::vector<std::uint16_t> flags;
   std::vector<std::int64_t> p_from, p_to;
-  std::vector<double> p_lat, p_lon;
+  std::vector<float> p_lat, p_lon;
   std::vector<float> p_elev;
   std::vector<Binding> bindings;
   auto add_string = [&](std::string_view v)
@@ -379,6 +424,7 @@ std::filesystem::path StationTableBuilder::seal(
   {
     ref.push_back(r);
     flags.push_back(s.flags);
+    merged.push_back(s.merged_into);
     name_off.push_back(add_string(s.name));
     name_len.push_back(static_cast<std::uint32_t>(s.name.size()));
     first_period.push_back(static_cast<std::uint32_t>(p_from.size()));
@@ -455,6 +501,7 @@ std::filesystem::path StationTableBuilder::seal(
   put_col(file, L.scol[kNIds], n_ids);
   put_col(file, L.scol[kNameOff], name_off);
   put_col(file, L.scol[kNameLen], name_len);
+  put_col(file, L.scol[kMerged], merged);
   put_col(file, L.pcol[kFrom], p_from);
   put_col(file, L.pcol[kTo], p_to);
   put_col(file, L.pcol[kLat], p_lat);
@@ -478,6 +525,7 @@ std::filesystem::path StationTableBuilder::seal(
   h.version = kVersion;
   h.generation = generation_;
   h.max_ref = max_ref_;
+  h.max_prov_ref = max_prov_ref_;
   h.n_stations = ref.size();
   h.n_periods = p_from.size();
   h.n_ids = bindings.size();
@@ -520,6 +568,11 @@ std::string_view StationView::name() const
 std::uint16_t StationView::flags() const
 {
   return table_->st_flags_[index_];
+}
+
+std::uint32_t StationView::merged_into() const
+{
+  return table_->st_merged_[index_];
 }
 
 std::size_t StationView::n_periods() const
@@ -570,6 +623,7 @@ Station StationView::to_station() const
   s.ref = ref();
   s.name = std::string(name());
   s.flags = flags();
+  s.merged_into = merged_into();
   for (std::size_t k = 0; k < n_ids(); ++k)
   {
     const StationIdView v = id(k);
@@ -735,6 +789,13 @@ StationTable::StationTable(const std::filesystem::path& path, Verify verify)
   }
   generation_ = h.generation;
   max_ref_ = h.max_ref;
+  max_prov_ref_ = h.max_prov_ref;
+  if (
+    max_ref_ >= kProvisionalRefBase ||
+    (max_prov_ref_ != 0 && max_prov_ref_ < kProvisionalRefBase))
+  {
+    throw bad("bad ref high-water marks");
+  }
   header_crc_ = h.crc_header;
   n_stations_ = static_cast<std::size_t>(h.n_stations);
   n_periods_ = static_cast<std::size_t>(h.n_periods);
@@ -775,10 +836,11 @@ StationTable::StationTable(const std::filesystem::path& path, Verify verify)
   st_n_ids_ = u32(L.scol[kNIds]);
   st_name_off_ = u32(L.scol[kNameOff]);
   st_name_len_ = u32(L.scol[kNameLen]);
+  st_merged_ = u32(L.scol[kMerged]);
   p_from_ = i64(L.pcol[kFrom]);
   p_to_ = i64(L.pcol[kTo]);
-  p_lat_ = reinterpret_cast<const double*>(base + L.pcol[kLat]);
-  p_lon_ = reinterpret_cast<const double*>(base + L.pcol[kLon]);
+  p_lat_ = reinterpret_cast<const float*>(base + L.pcol[kLat]);
+  p_lon_ = reinterpret_cast<const float*>(base + L.pcol[kLon]);
   p_elev_ = reinterpret_cast<const float*>(base + L.pcol[kElev]);
   id_type_ = reinterpret_cast<const std::uint16_t*>(base + L.icol[kType]);
   id_value_off_ = u32(L.icol[kValueOff]);
@@ -796,11 +858,12 @@ StationTable::StationTable(const std::filesystem::path& path, Verify verify)
   std::uint64_t next_period = 0, next_id = 0;
   for (std::size_t i = 0; i < n_stations_; ++i)
   {
-    if (
-      st_ref_[i] == 0 || st_ref_[i] > max_ref_ ||
-      (i > 0 && st_ref_[i] <= st_ref_[i - 1]))
+    const std::uint32_t r = st_ref_[i];
+    const bool in_range =
+      r >= kProvisionalRefBase ? r <= max_prov_ref_ : (r != 0 && r <= max_ref_);
+    if (!in_range || (i > 0 && r <= st_ref_[i - 1]))
     {
-      throw bad("station refs not strictly ascending in (0, max_ref]");
+      throw bad("station refs not ascending within their ranges");
     }
     if ((st_flags_[i] & ~kKnownFlags) != 0)
     {
@@ -832,6 +895,19 @@ StationTable::StationTable(const std::filesystem::path& path, Verify verify)
   if (next_period != n_periods_ || next_id != n_ids_)
   {
     throw bad("slice totals do not match counts");
+  }
+  for (std::size_t i = 0; i < n_stations_; ++i)
+  {
+    const std::uint32_t m = st_merged_[i];
+    if (m == 0)
+    {
+      continue;
+    }
+    const auto target = by_ref(m);
+    if (m == st_ref_[i] || !target || target->merged_into() != 0)
+    {
+      throw bad("bad merged_into");
+    }
   }
   for (std::size_t k = 0; k < n_ids_; ++k)
   {

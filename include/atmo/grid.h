@@ -31,7 +31,7 @@
 #include <string>
 #include <vector>
 
-#include "atmo/kdtree.hpp"
+#include "atmo/kdtree.h"
 
 namespace atmo
 {
@@ -62,6 +62,8 @@ struct GridIdentity
 
 struct GridData
 {
+  // f64, an exception to the f32 rule (docs/CONVENTIONS.md): locate()'s
+  // in-cell solve needs it, and these arrays are used on the CPU only.
   std::vector<double> lat_deg, lon_deg;
   std::vector<float> rot_rad;  // may be empty -> derived
 };

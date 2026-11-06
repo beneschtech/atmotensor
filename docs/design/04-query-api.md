@@ -31,7 +31,7 @@ Endpoints (v1)
 ## FastCGI front end
 
 Implementation: a small in-house FastCGI **responder** (FastCGI spec 1.0,
-responder role only), in `include/atmo/fcgi.hpp`, no external library. The
+responder role only), in `include/atmo/fcgi.h`, no external library. The
 protocol is 8-byte record headers (version 1, type, request id, content length,
 padding length) with BEGIN_REQUEST / PARAMS / STDIN in, STDOUT / STDERR /
 END_REQUEST out. Fallback if that proves troublesome: link libfcgi/fcgi2 from the

@@ -1,4 +1,4 @@
-#include "lambert.hpp"
+#include "lambert.h"
 
 #include <cmath>
 #include <cstddef>

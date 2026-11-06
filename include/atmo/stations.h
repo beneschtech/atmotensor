@@ -10,8 +10,15 @@
 //   * A station has a ref (u32, > 0), a name, flags, typed identifiers and
 //     position periods.  The ref identifies the station itself, not one of
 //     its periods, and is never reused: a new generation must contain every
-//     ref of the previous one, and new stations get refs above the previous
-//     generation's max_ref.  station_ref 0 means "no station" in reports.
+//     ref of the previous one.  station_ref 0 means "no station" in reports.
+//   * Refs come from two disjoint ranges (Q7), so the web app and ingest can
+//     both create stations without coordinating: the web app assigns
+//     [1, 2^31), ingest assigns provisional stations [2^31, 2^32).  In each
+//     range refs only grow: a new station's ref must be above that range's
+//     high-water mark in the previous generation.  A provisional station
+//     keeps its ref forever (reports point at it); confirming it clears the
+//     flag, and if it duplicates another station it is kept as an alias
+//     (merged_into = that station's ref).
 //   * Identifiers are typed (ICAO, WMO, WIGOS, platform) and bound to a
 //     station for a validity interval, because codes get reassigned.  For one
 //     (type, value) the intervals never overlap across the whole table, so
@@ -28,9 +35,9 @@
 // offset from the counts.
 //   stations     sorted by ref: ref u32, flags u16, first_period u32,
 //                n_periods u32, first_id u32, n_ids u32, name_off u32,
-//                name_len u32
+//                name_len u32, merged_into u32
 //   periods      contiguous per station: valid_from_s i64, valid_to_s i64,
-//                lat_deg f64, lon_deg f64, elevation_m f32
+//                lat_deg f32, lon_deg f32, elevation_m f32
 //   ids          identifier bindings sorted by (type, value, valid_from_s):
 //                type u16, value_off u32, value_len u32, ref u32,
 //                valid_from_s i64, valid_to_s i64
@@ -54,6 +61,9 @@ namespace atmo
 
 constexpr std::int64_t kTimeMin = std::numeric_limits<std::int64_t>::min();
 constexpr std::int64_t kTimeMax = std::numeric_limits<std::int64_t>::max();
+
+// First ref of the range ingest assigns to provisional stations (Q7).
+constexpr std::uint32_t kProvisionalRefBase = 1u << 31;
 
 // Station flags.
 constexpr std::uint16_t kStationProvisional = 1u << 0;  // not yet confirmed
@@ -88,8 +98,8 @@ struct StationPeriod
 {
   std::int64_t valid_from_s = kTimeMin;
   std::int64_t valid_to_s = kTimeMax;  // exclusive
-  double lat_deg = 0.0;
-  double lon_deg = 0.0;
+  float lat_deg = 0.0f;
+  float lon_deg = 0.0f;
   float elevation_m = 0.0f;  // geometric, above MSL
 
   bool operator==(const StationPeriod& o) const = default;
@@ -101,6 +111,9 @@ struct Station
   std::uint32_t ref = 0;  // 0 = let the builder assign one
   std::string name;
   std::uint16_t flags = 0;
+  // 0, or the ref of the station this one turned out to duplicate.  The
+  // target must exist and must not itself be merged (no chains).
+  std::uint32_t merged_into = 0;
   std::vector<StationIdBinding> ids;
   std::vector<StationPeriod> periods;
 
@@ -117,11 +130,12 @@ class StationTableBuilder
   StationTableBuilder();
   explicit StationTableBuilder(const StationTable& previous);
 
-  // Adds a new station and returns its ref.  ref 0 assigns max_ref() + 1;
-  // an explicit ref (e.g. a MySQL AUTO_INCREMENT value) must be above the
-  // previous generation's max_ref and unused.  Validates the station on its
-  // own (std::invalid_argument); cross-station identifier overlaps are
-  // checked by seal().
+  // Adds a new station and returns its ref.  ref 0 assigns the next ref of
+  // the provisional range if the station is flagged provisional, else of
+  // the web-app range.  An explicit ref (from the web app's export) must be
+  // above its range's high-water mark in the previous generation and
+  // unused.  Validates the station on its own (std::invalid_argument);
+  // identifier overlaps and merged_into targets are checked by seal().
   std::uint32_t add(Station s);
 
   // Replaces an existing station's data (same ref).  std::out_of_range if
@@ -131,18 +145,24 @@ class StationTableBuilder
   const Station* find(std::uint32_t ref) const;
   std::size_t size() const { return stations_.size(); }
   std::uint64_t generation() const { return generation_; }
+  // High-water marks: highest ref in [1, 2^31) and in [2^31, 2^32), 0 if
+  // the range is unused.
   std::uint32_t max_ref() const { return max_ref_; }
+  std::uint32_t max_provisional_ref() const { return max_prov_ref_; }
 
   // Writes `dir`/stations-<generation>.tbl (see StationTable::file_name)
   // with the same atomic, never-replace protocol as obs segments, and
   // returns its path.  std::invalid_argument if two stations bind the same
-  // identifier for overlapping times.  A builder seals exactly once.
+  // identifier for overlapping times, or a merged_into target is missing or
+  // merged itself.  A builder seals exactly once.
   std::filesystem::path seal(const std::filesystem::path& dir);
 
  private:
   std::uint64_t generation_ = 1;
   std::uint32_t base_max_ref_ = 0;
+  std::uint32_t base_max_prov_ref_ = 0;
   std::uint32_t max_ref_ = 0;
+  std::uint32_t max_prov_ref_ = 0;
   bool sealed_ = false;
   std::map<std::uint32_t, Station> stations_;
 };
@@ -167,6 +187,7 @@ class StationView
   std::uint32_t ref() const;
   std::string_view name() const;
   std::uint16_t flags() const;
+  std::uint32_t merged_into() const;  // 0 = not an alias
   std::size_t n_periods() const;
   StationPeriod period(std::size_t k) const;
   // The period containing t_s, if any.
@@ -212,6 +233,7 @@ class StationTable
   const std::filesystem::path& path() const { return path_; }
   std::uint64_t generation() const { return generation_; }
   std::uint32_t max_ref() const { return max_ref_; }
+  std::uint32_t max_provisional_ref() const { return max_prov_ref_; }
   std::uint32_t header_crc() const { return header_crc_; }
   std::size_t size() const { return n_stations_; }
 
@@ -241,6 +263,7 @@ class StationTable
   std::shared_ptr<const void> map_;  // keeps the mapping alive
   std::uint64_t generation_ = 0;
   std::uint32_t max_ref_ = 0;
+  std::uint32_t max_prov_ref_ = 0;
   std::uint32_t header_crc_ = 0;
   std::size_t n_stations_ = 0;
   std::size_t n_periods_ = 0;
@@ -255,10 +278,11 @@ class StationTable
   const std::uint32_t* st_n_ids_ = nullptr;
   const std::uint32_t* st_name_off_ = nullptr;
   const std::uint32_t* st_name_len_ = nullptr;
+  const std::uint32_t* st_merged_ = nullptr;
   const std::int64_t* p_from_ = nullptr;
   const std::int64_t* p_to_ = nullptr;
-  const double* p_lat_ = nullptr;
-  const double* p_lon_ = nullptr;
+  const float* p_lat_ = nullptr;
+  const float* p_lon_ = nullptr;
   const float* p_elev_ = nullptr;
   const std::uint16_t* id_type_ = nullptr;
   const std::uint32_t* id_value_off_ = nullptr;

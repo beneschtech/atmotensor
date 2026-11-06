@@ -4,10 +4,10 @@
 #include <random>
 #include <vector>
 
-#include "atmo/geo.hpp"
-#include "atmo/kdtree.hpp"
-#include "check.hpp"
-#include "lambert.hpp"
+#include "atmo/geo.h"
+#include "atmo/kdtree.h"
+#include "check.h"
+#include "lambert.h"
 
 using namespace atmo;
 

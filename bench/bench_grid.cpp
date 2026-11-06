@@ -4,8 +4,8 @@
 #include <filesystem>
 #include <random>
 
-#include "atmo/gridstore.hpp"
-#include "lambert.hpp"
+#include "atmo/gridstore.h"
+#include "lambert.h"
 
 using namespace atmo;
 using Clock = std::chrono::steady_clock;
