@@ -154,3 +154,19 @@ Q10 [decided by Chris 2026-11-08, design open] Store GRIB natively.
     Meanwhile T9 reads gridded data through a FieldStore interface
     (query.h), so a GRIB-native store can replace the T7 field files
     without touching the query code.
+Q11 [open] /v1/point details the sketch left open (T9, query.h). As
+    implemented, please confirm or change:
+    a) Field syntax `name[@level]` with @sfc, @msl, @<x>m (above ground),
+       @<x>hPa, @L<type>=<value>; without @level the query's level_hpa or
+       alt_m applies, else the variable's only stored level.
+    b) Time: newest run whose forecast hours bracket the time, linear
+       interpolation between the two hours of that run (never across
+       runs). No extrapolation.
+    c) Vertical: log-p between isobaric levels; alt_m via geopotential
+       height on isobaric levels converted to geometric (R = 6371008.8 m);
+       below the lowest/above the highest level -> status out_of_levels
+       (no extrapolation to the surface yet).
+    d) Each value carries a status (ok, no_time, outside_grid, no_field,
+       level_required, out_of_levels) so the web UI can explain gaps.
+    e) obs_radius_km is a radius in each source class's space-time metric
+       (time offsets count as distance via lambda), not pure distance.

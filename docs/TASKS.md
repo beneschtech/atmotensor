@@ -64,8 +64,11 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       (34 variables with GRIB2 discipline/category/number + scale/offset to
       SI), cmake/gen_variables.cmake (pure CMake), `gen_variables` target,
       `variables_header` staleness test, lookups in `variable.h`.
-- [ ] T9  Query engine library: `point()` combining Grid::locate, FieldFile
+- [x] T9  Query engine library: `point()` combining Grid::locate, FieldFile
       sample (space, time, log-p), ObsIndex; unit tests on synthetic data.
+      Done: `query.h` (FieldStore interface + SnapshotFieldStore, FieldSpec,
+      point(), to_json, meta_json). Storage-agnostic for Q10. API details:
+      Q11.
 - [ ] T10 FastCGI responder library (`include/atmo/fcgi.h`, spec and tests
       in 04-query-api.md "FastCGI front end"), then the query daemon skeleton:
       /healthz, /v1/meta, /v1/point over T9. Includes (from T5): watch

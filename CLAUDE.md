@@ -69,6 +69,9 @@ and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
   broken (missing libeccodes_f90), so it is probed in a sub-configure
   (cmake/eccodes_probe) before use; pkg-config is the usual route.
 - `tools/atmo_grib_ingest.cpp` dev CLI: ingest + publish
+- `include/atmo/query.h` point() engine: FieldStore interface (T7 files via
+  SnapshotFieldStore; GRIB-native store later, Q10), field specs
+  `name@level`, time/log-p/altitude interpolation, wind rotation, JSON
 - `include/atmo/crc32.h`    CRC-32 (zlib-compatible)
 - `include/atmo/source.h`   SourceClass (metric per source class),
   SourceRegistry (JSON config)
