@@ -38,15 +38,18 @@ endfunction()
 # KdTree4 and embed() are compiled in the users' translation units.
 add_library(atmo STATIC
   src/crc32.cpp
+  src/fcgi.cpp
   src/fieldfile.cpp
   src/geo.cpp
   src/grid.cpp
   src/gridstore.cpp
+  src/http_api.cpp
   src/jsonutil.cpp
   src/manifest.cpp
   src/fileio.cpp
   src/obs_index.cpp
   src/obs_segment.cpp
+  src/query.cpp
   src/refdata.cpp
   src/retention.cpp
   src/snapshot.cpp
@@ -61,6 +64,8 @@ target_include_directories(atmo PUBLIC
 target_include_directories(atmo SYSTEM PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party>)
 target_compile_features(atmo PUBLIC cxx_std_20)
+find_package(Threads REQUIRED)
+target_link_libraries(atmo PUBLIC Threads::Threads)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(atmo PUBLIC -ffp-contract=off)
 endif()
@@ -153,9 +158,14 @@ if(ATMO_BUILD_TESTS OR ATMO_BUILD_BENCH)
   atmo_target_defaults(atmo_testkit)
 endif()
 
+# Query daemon (T10).
+add_executable(atmo_queryd tools/atmo_queryd.cpp)
+target_link_libraries(atmo_queryd PRIVATE atmo::atmo)
+atmo_target_defaults(atmo_queryd)
+
 if(ATMO_BUILD_TESTS)
   enable_testing()
-  foreach(t kdtree grid source obs obs_index stations manifest refdata retention fieldfile variables)
+  foreach(t kdtree grid source obs obs_index stations manifest refdata retention fieldfile variables query fcgi http_api)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} PRIVATE atmo_testkit)
     atmo_target_defaults(test_${t})

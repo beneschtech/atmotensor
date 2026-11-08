@@ -29,6 +29,8 @@ CMake only (CLion); presets in CMakePresets.json: default, asan, ci.
     # options: ATMO_SANITIZE ATMO_WERROR ATMO_BUILD_TESTS ATMO_BUILD_BENCH
     #          ATMO_WITH_ECCODES=AUTO|ON|OFF, ECCODES_ROOT=/prefix
     ./build-cmake/atmo_grib_ingest --root DIR --model gfs [--seed-sources] F.grib2
+    ./build-cmake/atmo_queryd --root DIR --socket /run/atmo/query.sock  # behind nginx
+    # example nginx site: deploy/nginx-atmo.conf
 
 No Catch2/gtest: tests use the tiny harness in `tests/check.h` (TEST, CHECK,
 CHECK_NEAR; non-fatal). Keep new tests dependency-free. `-ffp-contract=off` is
@@ -69,6 +71,14 @@ and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
   broken (missing libeccodes_f90), so it is probed in a sub-configure
   (cmake/eccodes_probe) before use; pkg-config is the usual route.
 - `tools/atmo_grib_ingest.cpp` dev CLI: ingest + publish
+- `include/atmo/query.h` point() engine: FieldStore interface (T7 files via
+  SnapshotFieldStore; GRIB-native store later, Q10), field specs
+  `name@level`, time/log-p/altitude interpolation, wind rotation, JSON
+- `include/atmo/fcgi.h` in-house FastCGI responder: Connection (protocol
+  state machine, no I/O), Server (poll I/O thread + worker pool, 503/504)
+- `include/atmo/http_api.h` QueryApi (/healthz, /v1/meta, /v1/point,
+  ?snapshot= pinning), SnapshotWatcher (inotify + poll); daemon in
+  `tools/atmo_queryd.cpp`
 - `include/atmo/crc32.h`    CRC-32 (zlib-compatible)
 - `include/atmo/source.h`   SourceClass (metric per source class),
   SourceRegistry (JSON config)
@@ -178,7 +188,9 @@ journal for durability, eccodes from the distro package (hand-built via
   (The old plain Makefile existed for that VM; it was removed 2026-11-05.)
 - Benchmarks (2 cores, -O2): 2M-point KdTree4 builds in ~0.45 s, ~1.2 us
   nearest, ~3 us 8-NN; HRRR-size grid: write 0.42 s, load+verify 0.07 s,
-  ~1.4 us/locate.
+  ~1.4 us/locate. GFS 0.25 f000 (696 messages, 506 MB GRIB2):
+  atmo_grib_ingest 13.8 s, 108 MB RSS, 485 fields -> 2.2 GB field file
+  (uncompressed f32 tiles; field selection per model matters, 03 spec).
 - Do not commit or push unless asked.
 - Conventions from T1/T2: JSON text entry points are `from_text()` / `from_file()`
   (a `from_json(string_view)` overload would be ambiguous with `json`); config errors

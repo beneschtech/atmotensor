@@ -122,6 +122,10 @@ Q9 [open] GRIB2 message selection (T11). A field file holds one field per
        surface: 0-6 km shear, 180-0 hPa above ground CAPE vs 255-0) that
        collide on the first surface keep the first message. Add a second
        level to FieldInfo?
+       Seen in real data (GFS 0.25 f000, 2026-11-08): RH on sigma layers
+       0.44-0.72 and 0.44-1.0 share the first surface; the second was
+       skipped. 210 of the other 211 skips were parameters not yet in the
+       registry (hydrometeor mixing ratios, ozone, soil/land, waves).
     c) WMO-standard parameters only (< 192 in table 4.2). NCEP-local ones
        (composite reflectivity 0.16.196, HPBL 0.3.196, MSLMA 0.3.198) are
        skipped until the registry gets centre-specific GRIB mappings.
@@ -129,3 +133,46 @@ Q9 [open] GRIB2 message selection (T11). A field file holds one field per
        sub-hourly steps (HRRR subh files) are skipped.
     e) Messages on a second grid in the same input are skipped (one grid
        per field file); messages for another run/hour are an error.
+Q10 [decided by Chris 2026-11-08, design open] Store GRIB natively.
+    The GFS 0.25 test (CLAUDE.md benchmarks) showed f32 tiles are ~4.4x
+    the GRIB2 size; with RAP, HRRR, RRFS, ECMWF and more that is tens of
+    TB/day before obs. Decision: keep the GRIB2 files as published and
+    maintain an index of "useful pointers" into them instead of
+    re-encoding. Needs a design in the architect session, replacing or
+    narrowing 03-field-tiles.md. Points to settle:
+    a) Index contents per message: file, byte offset/length, grid key,
+       (param, level, second level, stat interval), run, fhr, packing.
+       Grids stay in GridStore (section 3 identity as now).
+    b) Query cost: GRIB2 complex/JPEG2000 packing must be unpacked whole
+       to read one point (milliseconds for HRRR), so a decoded-message
+       LRU in RAM and coalescing of identical in-flight decodes are
+       required, as CLAUDE.md already plans for tiles. Maybe keep f32
+       tiles for a small hot set (latest run, popular fields).
+    c) Scan-mode normalisation and unit conversion move from ingest to
+       decode time (same code: GribReader).
+    d) Retention/gc work on whole GRIB files referenced by the index.
+    Meanwhile T9 reads gridded data through a FieldStore interface
+    (query.h), so a GRIB-native store can replace the T7 field files
+    without touching the query code.
+Q11 [open] /v1/point details the sketch left open (T9, query.h). As
+    implemented, please confirm or change:
+    a) Field syntax `name[@level]` with @sfc, @msl, @<x>m (above ground),
+       @<x>hPa, @L<type>=<value>; without @level the query's level_hpa or
+       alt_m applies, else the variable's only stored level.
+    b) Time: newest run whose forecast hours bracket the time, linear
+       interpolation between the two hours of that run (never across
+       runs). No extrapolation.
+    c) Vertical: log-p between isobaric levels; alt_m via geopotential
+       height on isobaric levels converted to geometric (R = 6371008.8 m);
+       below the lowest/above the highest level -> status out_of_levels
+       (no extrapolation to the surface yet).
+    d) Each value carries a status (ok, no_time, outside_grid, no_field,
+       level_required, out_of_levels) so the web UI can explain gaps.
+    e) obs_radius_km is a radius in each source class's space-time metric
+       (time offsets count as distance via lambda), not pure distance.
+    f) (T10) `time` is required on /v1/point (no "now" default), so equal
+       requests on one snapshot give byte-identical responses as the spec
+       demands; the web UI passes the time it shows.
+    g) (T10) ?snapshot=<seq> responses are Cache-Control: public,
+       max-age=86400; live ones no-store. A pinned snapshot whose files
+       expired answers 410, one no longer retained 404.
