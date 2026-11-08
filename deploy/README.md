@@ -22,8 +22,11 @@ The API the web app and customers use is specified in
     ./build-cmake/atmo_grib_ingest --root /opt/atmotensor/data --model gfs \
         --seed-sources /opt/atmotensor/ingest/grib/gfs.t18z.pgrb2.0p25.f000
 
-`--seed-sources` writes the default observation source classes to
-`data/config/sources.json` once; later the web app exports that file.
+Each file is kept as published (hard-linked into `data/grib/<model>/<run>/`,
+so no extra disk) next to a small index; queries decode messages on demand
+into the daemon's cache. `--seed-sources` writes the default observation
+source classes to `data/config/sources.json` once; later the web app
+exports that file.
 
 ## 3. Query daemon (systemd)
 
@@ -31,6 +34,11 @@ The API the web app and customers use is specified in
     sudo systemctl daemon-reload
     sudo systemctl enable --now atmo-queryd
     journalctl -u atmo-queryd -f
+
+Memory: decoded GRIB messages are cached up to `--cache-mb` (default
+4096); when the process RSS passes `--rss-limit-mb` (default 2 x cache +
+1024) the oldest unused messages are dropped. `systemctl reload` logs the
+cache statistics.
 
 It listens on `/run/atmo/query.sock` (group www-data, mode 0660), follows
 new snapshots automatically, drains on `systemctl stop`, re-reads the

@@ -5,7 +5,8 @@
     grids/<key>.grid                         gridstore.h (done)
     stations/stations-<gen>.tbl
     obs/<source>/<bucket_start>/<seg-id>.seg
-    fields/<model>/<run YYYYmmddHH>/f<fhr:03>.fld
+    grib/<model>/<run YYYYmmddHH>/<file>      GRIB2 as published + <file>.idx.json (T10c)
+    fields/<model>/<run YYYYmmddHH>/f<fhr:03>.fld   f32 tiles (T7; optional hot set)
     journal/<source>-<YYYYmmddHH>.jrn        raw feed journal (see below)
     manifest/MANIFEST-<seq:016x>.json        immutable
     manifest/CURRENT                         tiny file: seq + CRC, replaced by rename

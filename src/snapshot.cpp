@@ -1,7 +1,11 @@
 #include "atmo/snapshot.h"
 
+#include "atmo/crc32.h"
 #include "atmo/gridstore.h"
 
+#include <algorithm>
+#include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -23,7 +27,7 @@ namespace fs = std::filesystem;
 }  // namespace
 
 Snapshot::Snapshot(const fs::path& root, Manifest m, const Snapshot* previous)
-    : manifest_(std::move(m))
+    : root_(root), manifest_(std::move(m))
 {
   // Stations.
   if (manifest_.stations)
@@ -115,6 +119,69 @@ Snapshot::Snapshot(const fs::path& root, Manifest m, const Snapshot* previous)
       ff->require_grid(*grids_.at(e.grid_key));
     }
     fields_[{e.model, e.run_s, e.fhr}] = std::move(ff);
+  }
+
+  // GRIB indexes (T10c): the GRIB files themselves are read on demand.
+  std::map<std::string, std::pair<const GribEntry*, GribIndexPtr>> prev_gribs;
+  if (previous)
+  {
+    for (std::size_t i = 0; i < previous->manifest_.gribs.size(); ++i)
+    {
+      prev_gribs[previous->manifest_.gribs[i].path] = {
+        &previous->manifest_.gribs[i], previous->grib_indexes_[i]};
+    }
+  }
+  for (const auto& e : manifest_.gribs)
+  {
+    auto it = prev_gribs.find(e.path);
+    if (it != prev_gribs.end() && *it->second.first == e)
+    {
+      grib_indexes_.push_back(it->second.second);
+      continue;
+    }
+    std::string text;
+    {
+      std::ifstream in(root / e.index_path, std::ios::binary);
+      if (!in)
+      {
+        throw std::runtime_error("snapshot: " + e.index_path + ": missing");
+      }
+      std::ostringstream ss;
+      ss << in.rdbuf();
+      text = ss.str();
+    }
+    ++opened_;
+    if (crc32(text.data(), text.size()) != e.index_crc)
+    {
+      mismatch(e.index_path, "index CRC");
+    }
+    GribIndexPtr idx;
+    try
+    {
+      idx = std::make_shared<const GribIndex>(GribIndex::from_text(text));
+    }
+    catch (const std::invalid_argument& ex)
+    {
+      throw std::runtime_error("snapshot: " + e.index_path + ": " + ex.what());
+    }
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(root / e.path, ec);
+    if (ec || size != e.size || idx->size != e.size)
+    {
+      mismatch(e.path, "GRIB file size");
+    }
+    if (idx->model != e.model || idx->run_s != e.run_s || idx->grib != e.path)
+    {
+      mismatch(e.index_path, "model, run or file name");
+    }
+    for (const auto& msg : idx->entries)
+    {
+      if (std::find(e.grids.begin(), e.grids.end(), msg.grid) == e.grids.end())
+      {
+        mismatch(e.index_path, "message on a grid the entry does not list");
+      }
+    }
+    grib_indexes_.push_back(std::move(idx));
   }
 
   // Segments.

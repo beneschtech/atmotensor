@@ -133,7 +133,7 @@ Q9 [open] GRIB2 message selection (T11). A field file holds one field per
        sub-hourly steps (HRRR subh files) are skipped.
     e) Messages on a second grid in the same input are skipped (one grid
        per field file); messages for another run/hour are an error.
-Q10 [decided by Chris 2026-11-08, design open] Store GRIB natively.
+Q10 [decided by Chris 2026-11-08; implemented in T10c] Store GRIB natively.
     The GFS 0.25 test (CLAUDE.md benchmarks) showed f32 tiles are ~4.4x
     the GRIB2 size; with RAP, HRRR, RRFS, ECMWF and more that is tens of
     TB/day before obs. Decision: keep the GRIB2 files as published and
@@ -211,3 +211,19 @@ Q12 [decided by Chris 2026-11-08, format open] Map tiles are PNG,
     per variable, tile resampling (bilinear from the grid per pixel),
     and whether the run segment accepts "latest" (would make tiles
     mutable, so probably not).
+    T10c as built (2026-11-08): GRIB files hard-linked unchanged into
+    data/grib/<model>/<run>/ with <file>.idx.json (offset, length, FNV-1a
+    content hash, variable, level, fhr, grid per usable message); manifest
+    `gribs` entries; GribCache keyed by the content hash holding the
+    decoded doubles in normalised order plus a shared_ptr to the grid
+    (lats/lons shared per grid, Chris agreed); in-use = shared_ptr held
+    (replaces the atomic_bool, which cannot count two readers). Purge on
+    insert: over the byte budget -> down to purge_to of it; RSS over the
+    limit -> shed the oldest unused 25% per insert; maintain() every 5 s
+    in atmo_queryd drops all unused entries while RSS is over the limit,
+    then malloc_trim. GFS 0.25 f000: ingest 0.97 s, ~0 extra disk (link)
+    + 119 KB index; cold query ~30-45 ms per message decoded, warm 0.14 ms.
+    Follow-ups: altitude queries decode gh on every isobaric level to find
+    the bracket (562 ms cold) - estimate it with a standard atmosphere and
+    decode only the neighbours; keep the T7 tiles only if a hot set needs
+    them.

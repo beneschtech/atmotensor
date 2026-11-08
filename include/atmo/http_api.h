@@ -37,12 +37,14 @@ std::map<std::string, std::string> parse_query_string(std::string_view qs);
 class QueryApi
 {
  public:
-  // `loader` must outlive the API.  Up to `pinned_cache` older snapshots
-  // stay open for ?snapshot=.
+  // `loader` (and `grib_cache`, if given) must outlive the API.  Up to
+  // `pinned_cache` older snapshots stay open for ?snapshot=.  Without a
+  // GRIB cache, GRIB-native data is listed but samples as null.
   QueryApi(
     std::filesystem::path root,
     SnapshotLoader& loader,
-    std::size_t pinned_cache = 4);
+    std::size_t pinned_cache = 4,
+    GribCache* grib_cache = nullptr);
   ~QueryApi();
 
   // Thread-safe.
@@ -61,6 +63,7 @@ class QueryApi
   std::filesystem::path root_;
   SnapshotLoader& loader_;
   std::size_t pinned_cache_;
+  GribCache* grib_cache_;
   mutable std::mutex mu_;
   mutable View current_;
   mutable std::list<View> pinned_;  // most recently used first

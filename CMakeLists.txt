@@ -42,6 +42,7 @@ add_library(atmo STATIC
   src/fieldfile.cpp
   src/geo.cpp
   src/grid.cpp
+  src/gribstore.cpp
   src/gridstore.cpp
   src/http_api.cpp
   src/jsonutil.cpp
@@ -165,7 +166,7 @@ atmo_target_defaults(atmo_queryd)
 
 if(ATMO_BUILD_TESTS)
   enable_testing()
-  foreach(t kdtree grid source obs obs_index stations manifest refdata retention fieldfile variables query fcgi http_api)
+  foreach(t kdtree grid source obs obs_index stations manifest refdata retention fieldfile variables query fcgi http_api gribstore)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} PRIVATE atmo_testkit)
     atmo_target_defaults(test_${t})

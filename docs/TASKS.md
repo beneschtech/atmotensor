@@ -101,9 +101,13 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       Message selection policy: Q9.
 - [ ] T10b PNG map tiles + colormaps (Q12): /v1/tiles and /v1/colormaps per
       docs/api/query-api-v1.md; colormap export format first (with Chris).
-- [ ] T10c GRIB-native gridded store (Q10): index of messages in the
+- [x] T10c GRIB-native gridded store (Q10): index of messages in the
       original GRIB2 files + decoded-message cache (Chris's design in Q10);
       implements FieldStore so T9/T10 need no change. Design review first.
+      Done: `gribstore.h` (GribIndex, GribCache, process_rss), grib.h
+      index_grib/grib_decoder, manifest `gribs`, snapshot index loading,
+      SnapshotFieldStore over GRIB, atmo_grib_ingest native by default,
+      atmo_queryd --cache-mb/--rss-limit-mb. Details and numbers in Q10.
 - [ ] T11b Derived products (D12): write 06-derived-products.md with Chris
       first (derivation registry format, trigger when inputs complete,
       provenance, versioning, where feature outputs such as fronts live).

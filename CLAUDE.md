@@ -29,7 +29,7 @@ CMake only (CLion); presets in CMakePresets.json: default, asan, ci.
     ./build-cmake/bench_kdtree; ./build-cmake/bench_grid
     # options: ATMO_SANITIZE ATMO_WERROR ATMO_BUILD_TESTS ATMO_BUILD_BENCH
     #          ATMO_WITH_ECCODES=AUTO|ON|OFF, ECCODES_ROOT=/prefix
-    ./build-cmake/atmo_grib_ingest --root DIR --model gfs [--seed-sources] F.grib2
+    ./build-cmake/atmo_grib_ingest --root DIR --model gfs [--seed-sources] [--tiles] F.grib2
     ./build-cmake/atmo_queryd --root DIR --socket /run/atmo/query.sock  # behind nginx
     # deploy: deploy/README.md (nginx snippet + systemd unit); API contract: docs/api/query-api-v1.md
 
@@ -80,6 +80,11 @@ and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
 - `include/atmo/http_api.h` QueryApi (/healthz, /v1/meta, /v1/point,
   ?snapshot= pinning), SnapshotWatcher (inotify + poll); daemon in
   `tools/atmo_queryd.cpp`
+- `include/atmo/gribstore.h` GRIB-native store (Q10, T10c): GribIndex
+  (sidecar <file>.idx.json), GribCache (hash -> decoded doubles + shared
+  grid, LRU purge by byte budget and /proc RSS, shared_ptr = in use,
+  coalesced decodes), process_rss(); ingest/decoder in grib.h
+  (index_grib, grib_decoder). Default ingest path; T7 tiles via --tiles.
 - `include/atmo/crc32.h`    CRC-32 (zlib-compatible)
 - `include/atmo/source.h`   SourceClass (metric per source class),
   SourceRegistry (JSON config)

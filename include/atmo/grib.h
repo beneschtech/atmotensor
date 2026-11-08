@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "atmo/fieldfile.h"
+#include "atmo/gribstore.h"
 #include "atmo/grid.h"
 #include "atmo/manifest.h"
 
@@ -124,5 +125,36 @@ GribIngestResult ingest_grib(
 // Adds the result's grid (unless listed) and field file to `m`.
 // std::invalid_argument if `m` already lists that field file.
 void add_to_manifest(Manifest& m, const GribIngestResult& r);
+
+// ---- GRIB-native store (T10c, Q10; gribstore.h) ---------------------------
+
+struct GribNativeResult
+{
+  GribEntry entry;               // for the manifest
+  std::vector<GridEntry> grids;  // grids its messages use
+  GribIndex index;
+};
+
+// Keeps a GRIB2 file as published: indexes its usable messages (same rules
+// as above), hard-links it into root/grib/<model>/<run YYYYmmddHH>/<name>
+// (a copy if `source` is on another filesystem), writes the index sidecar
+// <name>.idx.json, and stores the grids in the GridStore.  The source file
+// is left in place.  Publishing is the caller's job (add_to_manifest).
+// std::runtime_error if the file is unreadable or corrupt, its messages
+// belong to different runs, nothing is usable, or the target exists.
+// std::invalid_argument for bad options.
+GribNativeResult index_grib(
+  const std::filesystem::path& root,
+  const std::filesystem::path& source,
+  const GribIngestOptions& options);
+
+// Adds the entry and any grids not listed yet.  std::invalid_argument if
+// `m` already lists that file.
+void add_to_manifest(Manifest& m, const GribNativeResult& r);
+
+// Decoder for GribCache: reads the message at its offset, checks it still
+// hashes to the indexed value, decodes values into registry units and
+// normalised order.
+GribDecoder grib_decoder();
 
 }  // namespace atmo

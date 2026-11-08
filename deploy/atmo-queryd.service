@@ -15,7 +15,8 @@ RuntimeDirectoryMode=0750
 ExecStart=/opt/atmotensor/src/atmotensor/build-cmake/atmo_queryd \
     --root /opt/atmotensor/data \
     --socket /run/atmo/query.sock \
-    --threads 8 --queue 128
+    --threads 8 --queue 128 \
+    --cache-mb 4096 --rss-limit-mb 9216
 ExecReload=/bin/kill -HUP $MAINPID
 KillSignal=SIGTERM
 TimeoutStopSec=30
