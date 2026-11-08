@@ -1,0 +1,32 @@
+# systemd unit for the AtmoTensor query daemon.
+#   sudo cp deploy/atmo-queryd.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now atmo-queryd
+# The socket is created group www-data, mode 0660, so nginx can connect and
+# nobody else can.  The daemon only reads the store.
+[Unit]
+Description=AtmoTensor query daemon (FastCGI)
+After=network.target
+
+[Service]
+User=cbenesch
+Group=www-data
+RuntimeDirectory=atmo
+RuntimeDirectoryMode=0750
+ExecStart=/opt/atmotensor/src/atmotensor/build-cmake/atmo_queryd \
+    --root /opt/atmotensor/data \
+    --socket /run/atmo/query.sock \
+    --threads 8 --queue 128
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=2
+# Hardening: read-only everywhere except the runtime directory.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/opt/atmotensor
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

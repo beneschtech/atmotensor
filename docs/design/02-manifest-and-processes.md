@@ -1,6 +1,6 @@
 # Manifest, snapshots, processes, directory layout
 
-## Directory layout (`/atmotensor`, configurable root)
+## Directory layout (root `/opt/atmotensor/data`, configurable)
 
     grids/<key>.grid                         gridstore.h (done)
     stations/stations-<gen>.tbl
@@ -13,6 +13,7 @@
     config/sources.json                      exported by the web app (05-reference-data.md)
     config/stations.json                     exported by the web app
     tmp/                                     staging; anything here is garbage after a crash
+                                             (feed downloads use /opt/atmotensor/tmp, same volume)
 
 ## Manifest
 
@@ -97,7 +98,7 @@ refetch from NOAA.
 
 Stateless apart from the snapshot and in-RAM caches. Several can run on one
 box (separate ports, or behind the reverse proxy) sharing the same mmapped
-pages. They never write to `/atmotensor` (mount read-only for them if the
+pages. They never write to the store (mount read-only for them if the
 deployment allows).
 
 ## Acceptance tests

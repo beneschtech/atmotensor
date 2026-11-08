@@ -2,7 +2,7 @@
 // protocol that makes a new list visible atomically
 // (docs/design/02-manifest-and-processes.md).
 //
-// Layout under the root (default /atmotensor):
+// Layout under the root (deployed: /opt/atmotensor/data):
 //   manifest/MANIFEST-<seq:016x>.json   immutable, one per publish
 //   manifest/CURRENT                    "atmo-current 1 <seq> <crc32 hex>\n"
 //   manifest/LOCK                       flock held by the one publisher

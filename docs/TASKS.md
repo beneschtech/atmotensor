@@ -99,6 +99,11 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       missing libeccodes_f90.so.0), so the config package is probed in a
       sub-configure (cmake/eccodes_probe) and pkg-config is used there.
       Message selection policy: Q9.
+- [ ] T10b PNG map tiles + colormaps (Q12): /v1/tiles and /v1/colormaps per
+      docs/api/query-api-v1.md; colormap export format first (with Chris).
+- [ ] T10c GRIB-native gridded store (Q10): index of messages in the
+      original GRIB2 files + decoded-message cache (Chris's design in Q10);
+      implements FieldStore so T9/T10 need no change. Design review first.
 - [ ] T11b Derived products (D12): write 06-derived-products.md with Chris
       first (derivation registry format, trigger when inputs complete,
       provenance, versioning, where feature outputs such as fronts live).
