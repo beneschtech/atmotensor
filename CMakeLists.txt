@@ -38,6 +38,7 @@ endfunction()
 # KdTree4 and embed() are compiled in the users' translation units.
 add_library(atmo STATIC
   src/crc32.cpp
+  src/fieldfile.cpp
   src/geo.cpp
   src/grid.cpp
   src/gridstore.cpp
@@ -74,7 +75,7 @@ endif()
 
 if(ATMO_BUILD_TESTS)
   enable_testing()
-  foreach(t kdtree grid source obs obs_index stations manifest refdata retention)
+  foreach(t kdtree grid source obs obs_index stations manifest refdata retention fieldfile)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} PRIVATE atmo_testkit)
     atmo_target_defaults(test_${t})

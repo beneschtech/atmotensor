@@ -54,6 +54,9 @@ and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
 - `include/atmo/grid.h`     GridIdentity/GridKey, GridData, Grid
   (locate/nearest), rotation
 - `include/atmo/gridstore.h` GridStore: immutable on-disk grid files
+- `include/atmo/fieldfile.h` FieldFileWriter / FieldFile: per (model,
+  run, fhr) float32 tiles (256 + halo 1, NaN outside, periodic halo wraps),
+  lazy per-tile CRC, bilinear `sample(field, Grid::Cell)`
 - `include/atmo/crc32.h`    CRC-32 (zlib-compatible)
 - `include/atmo/source.h`   SourceClass (metric per source class),
   SourceRegistry (JSON config)
@@ -81,8 +84,8 @@ and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
   station generation), provisional stations + config/outbox/ (Q7, Q8)
 - `src/jsonutil.h/.cpp` internal: strict JSON field helpers (check_keys,
   get_u64/..., check_format, parse_json); all errors std::invalid_argument
-- `src/fileio.h/.cpp` internal: publish_file (temp+fsync+link+dir fsync),
-  MappedFile, align_up; shared by every immutable-file writer/reader
+- `src/fileio.h/.cpp` internal: TempFile (write in place, then
+  fsync+link+dir fsync), publish_file, MappedFile, align_up; shared by every immutable-file writer/reader
 - `third_party/`  vendored single headers (nlohmann/json 3.11.3, MIT); see
   its README.md. Included as `<nlohmann/json.hpp>` via a SYSTEM include
   path. Don't edit or reformat vendored files.

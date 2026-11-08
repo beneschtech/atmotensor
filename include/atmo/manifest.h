@@ -40,6 +40,7 @@
 namespace atmo
 {
 
+class FieldFile;
 class ObsSegment;
 class StationTable;
 
@@ -71,6 +72,11 @@ struct FieldEntry
   std::uint32_t header_crc = 0;
 
   bool operator==(const FieldEntry&) const = default;
+
+  // The entry describing an opened field file under `root`.
+  static FieldEntry from_file(
+    const std::filesystem::path& root,
+    const FieldFile& file);
 };
 
 struct SegmentEntry

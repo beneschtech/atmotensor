@@ -10,8 +10,7 @@
 // snapshot (same path and header CRC) reuse their mapping; new files get a
 // full CRC check.  Each request takes current() once and uses only that.
 //
-// Not here yet: field files (T7; their entries are carried in the manifest
-// but not opened), watching CURRENT with inotify (the query daemon, T10),
+// Not here yet: watching CURRENT with inotify (the query daemon, T10),
 // pinning a retained older snapshot (T10).
 #pragma once
 
@@ -21,8 +20,12 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <string_view>
+#include <tuple>
 #include <vector>
 
+#include "atmo/fieldfile.h"
 #include "atmo/grid.h"
 #include "atmo/manifest.h"
 #include "atmo/obs_index.h"
@@ -39,6 +42,7 @@ class Snapshot
   using SegPtr = std::shared_ptr<const ObsSegment>;
   using GridPtr = std::shared_ptr<const Grid>;
   using StationsPtr = std::shared_ptr<const StationTable>;
+  using FieldPtr = std::shared_ptr<const FieldFile>;
 
   // Opens everything `m` names under `root`.  `previous` (may be null)
   // donates mappings of unchanged files.  std::runtime_error if a file is
@@ -57,6 +61,12 @@ class Snapshot
   const StationsPtr& stations() const { return stations_; }
   // nullptr if the grid is not in the snapshot.
   GridPtr grid(GridKey key) const;
+  // nullptr if that field file is not in the snapshot.  The file has been
+  // checked against its grid (grid(file->grid_key())).
+  FieldPtr field_file(
+    std::string_view model,
+    std::int64_t run_s,
+    std::uint32_t fhr) const;
   // In manifest order.
   const std::vector<SegPtr>& segments() const { return segments_; }
   const ObsIndex& obs() const { return *obs_; }
@@ -68,6 +78,8 @@ class Snapshot
   Manifest manifest_;
   StationsPtr stations_;
   std::map<GridKey, GridPtr> grids_;
+  std::map<std::tuple<std::string, std::int64_t, std::uint32_t>, FieldPtr>
+    fields_;
   std::vector<SegPtr> segments_;
   std::unique_ptr<ObsIndex> obs_;
   std::size_t opened_ = 0;

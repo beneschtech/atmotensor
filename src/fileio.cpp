@@ -56,20 +56,17 @@ void fsync_dir(const std::filesystem::path& dir, const char* who)
   }
 }
 
-void publish_file(
-  const std::filesystem::path& path,
-  const std::vector<unsigned char>& bytes,
-  const char* who)
+TempFile::TempFile(std::filesystem::path path, const char* who)
+    : path_(std::move(path)), who_(who)
 {
   namespace fs = std::filesystem;
   const fs::path dir =
-    path.has_parent_path() ? path.parent_path() : fs::path(".");
+    path_.has_parent_path() ? path_.parent_path() : fs::path(".");
   // Create missing directories, remembering which, so their own entries
   // can be made durable too.
-  std::vector<fs::path> created;
   for (fs::path d = dir; !d.empty() && !fs::exists(d); d = d.parent_path())
   {
-    created.push_back(d);
+    created_.push_back(d);
     if (!d.has_parent_path() || d.parent_path() == d)
     {
       break;
@@ -78,49 +75,76 @@ void publish_file(
   fs::create_directories(dir);
 
   static std::atomic<unsigned> counter{0};
-  const fs::path tmp(
-    path.string() + ".tmp." + std::to_string(::getpid()) + "." +
+  tmp_ = fs::path(
+    path_.string() + ".tmp." + std::to_string(::getpid()) + "." +
     std::to_string(counter++));
-  const int fd =
-    ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
-  if (fd < 0)
+  fd_ = ::open(tmp_.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+  if (fd_ < 0)
   {
     throw std::runtime_error(
-      std::string(who) + ": cannot create " + tmp.string() + ": " +
+      std::string(who_) + ": cannot create " + tmp_.string() + ": " +
       std::strerror(errno));
   }
-  try
+}
+
+TempFile::~TempFile()
+{
+  if (fd_ >= 0)
   {
-    write_all(fd, bytes.data(), bytes.size(), 0, who);
-    if (::fsync(fd) != 0)
-    {
-      throw std::runtime_error(
-        std::string(who) + ": fsync: " + std::strerror(errno));
-    }
+    ::close(fd_);
   }
-  catch (...)
+  if (!published_)
   {
-    ::close(fd);
-    ::unlink(tmp.c_str());
-    throw;
+    ::unlink(tmp_.c_str());
   }
-  ::close(fd);
+}
+
+void TempFile::write(const void* buf, std::size_t n, std::size_t off)
+{
+  write_all(fd_, buf, n, off, who_);
+}
+
+void TempFile::publish()
+{
+  namespace fs = std::filesystem;
+  if (published_ || fd_ < 0)
+  {
+    throw std::logic_error(std::string(who_) + ": TempFile published twice");
+  }
+  if (::fsync(fd_) != 0)
+  {
+    throw std::runtime_error(
+      std::string(who_) + ": fsync: " + std::strerror(errno));
+  }
+  ::close(fd_);
+  fd_ = -1;
   // link() refuses to replace an existing name: published files are
   // immutable.
-  if (::link(tmp.c_str(), path.c_str()) != 0)
+  if (::link(tmp_.c_str(), path_.c_str()) != 0)
   {
-    const int err = errno;
-    ::unlink(tmp.c_str());
     throw std::runtime_error(
-      std::string(who) + ": cannot publish " + path.string() + ": " +
-      std::strerror(err));
+      std::string(who_) + ": cannot publish " + path_.string() + ": " +
+      std::strerror(errno));
   }
-  ::unlink(tmp.c_str());
-  fsync_dir(dir, who);
-  for (const fs::path& d : created)
+  published_ = true;
+  ::unlink(tmp_.c_str());
+  const fs::path dir =
+    path_.has_parent_path() ? path_.parent_path() : fs::path(".");
+  fsync_dir(dir, who_);
+  for (const fs::path& d : created_)
   {
-    fsync_dir(d.has_parent_path() ? d.parent_path() : fs::path("."), who);
+    fsync_dir(d.has_parent_path() ? d.parent_path() : fs::path("."), who_);
   }
+}
+
+void publish_file(
+  const std::filesystem::path& path,
+  const std::vector<unsigned char>& bytes,
+  const char* who)
+{
+  TempFile f(path, who);
+  f.write(bytes.data(), bytes.size(), 0);
+  f.publish();
 }
 
 std::shared_ptr<const MappedFile> MappedFile::open(

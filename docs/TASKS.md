@@ -51,8 +51,11 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       `retired` list maintained by publish(), segment entries carry
       `bucket_seconds`, `ManifestPublisher::collect_garbage()` and
       `set_clock()`. See 02-manifest-and-processes.md "Retirement".
-- [ ] T7  Field file write/read (03-field-tiles.md) + `sample()` bilinear
+- [x] T7  Field file write/read (03-field-tiles.md) + `sample()` bilinear
       including periodic halo. Acceptance tests 1-4.
+      Done: `fieldfile.h` (FieldFileWriter streams tiles, FieldFile with
+      lazy tile CRCs, sample/value/tile/require_grid); snapshots now open
+      field files (FieldEntry::from_file, Snapshot::field_file).
 - [ ] T8  Raw journal + replay (02-...md acceptance test 5), group commit.
 - [ ] T8b Variable registry (Q4): checked-in registry file, generator for
       `include/atmo/variables.h` (constants + names + SI units), ~25
