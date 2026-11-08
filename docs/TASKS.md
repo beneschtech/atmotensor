@@ -36,11 +36,15 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       readers), `snapshot.h` (Snapshot, SnapshotLoader). Deferred to T10:
       inotify watch of CURRENT, `?snapshot=<seq>` pinning. Field entries
       are carried but not opened until T7.
-- [ ] T5b Reference-data import (05-reference-data.md): watch config/,
+- [x] T5b Reference-data import (05-reference-data.md): watch config/,
       validate sources.json and stations.json, keep the previous version on
       error, publish through the manifest (source classes copied into it;
       stations as the next generation). Provisional-station write-back after
       Q7 is decided.
+      Done: `refdata.h` (StationsExport JSON, RefDataImporter::poll() with
+      change detection by inode/size/mtime, add_provisional() + outbox).
+      Policy points in Q8. Deferred to the ingest daemon: inotify on
+      config/ (poll() is what it calls).
 - [ ] T6  Retention + gc (expire buckets/runs, grace-period unlink,
       `gc()` of unreferenced files). Tests with fake clocks.
 - [ ] T7  Field file write/read (03-field-tiles.md) + `sample()` bilinear

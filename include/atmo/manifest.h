@@ -113,9 +113,9 @@ struct Manifest
   // "MANIFEST-<seq as 16 hex digits>.json"
   static std::string file_name(std::uint64_t seq);
 
-  // Paths relative, under their kind's directory, no "." or ".."
-  // components, unique; grid keys and (model, run, fhr) unique; field
-  // grids present; segment sources known; receipt seqs below
+  // At least one source class; paths relative, under their kind's directory, no
+  // "." or ".." components, unique; grid keys and (model, run, fhr) unique;
+  // field grids present; segment sources known; receipt seqs below
   // next_receipt_seq.  std::invalid_argument otherwise.
   void validate() const;
 

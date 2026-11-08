@@ -21,6 +21,7 @@
 #include "atmo/obs_segment.h"
 #include "atmo/stations.h"
 #include "fileio.h"
+#include "jsonutil.h"
 
 namespace atmo
 {
@@ -48,89 +49,15 @@ constexpr int kCurrentVersion = 1;
     std::string("manifest: ") + p.string() + ": " + what);
 }
 
-// ---- JSON field access (strict) -------------------------------------------
+// ---- JSON field access ------------------------------------------------
 
-void check_keys(
-  const json& j,
-  const char* what,
-  std::initializer_list<const char*> allowed)
-{
-  if (!j.is_object())
-  {
-    bad(std::string(what) + ": not a JSON object");
-  }
-  for (const auto& [k, v] : j.items())
-  {
-    bool ok = false;
-    for (const char* a : allowed)
-    {
-      ok = ok || k == a;
-    }
-    if (!ok)
-    {
-      bad(std::string(what) + ": unknown key \"" + k + "\"");
-    }
-  }
-  for (const char* a : allowed)
-  {
-    if (!j.contains(a))
-    {
-      bad(std::string(what) + ": missing \"" + a + "\"");
-    }
-  }
-}
+using detail::check_keys;
+using detail::get_i64;
+using detail::get_str;
+using detail::get_u32;
+using detail::get_u64;
 
-std::uint64_t get_u64(const json& j, const char* key, const char* what)
-{
-  const json& v = j.at(key);
-  if (!v.is_number_unsigned())
-  {
-    bad(std::string(what) + ": \"" + key + "\" must be an unsigned integer");
-  }
-  return v.get<std::uint64_t>();
-}
-
-std::uint32_t get_u32(const json& j, const char* key, const char* what)
-{
-  const std::uint64_t v = get_u64(j, key, what);
-  if (v > std::numeric_limits<std::uint32_t>::max())
-  {
-    bad(std::string(what) + ": \"" + key + "\" out of range");
-  }
-  return static_cast<std::uint32_t>(v);
-}
-
-std::int64_t get_i64(const json& j, const char* key, const char* what)
-{
-  const json& v = j.at(key);
-  if (v.is_number_unsigned())
-  {
-    if (
-      v.get<std::uint64_t>() >
-      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
-    {
-      bad(std::string(what) + ": \"" + key + "\" out of range");
-    }
-    return static_cast<std::int64_t>(v.get<std::uint64_t>());
-  }
-  if (!v.is_number_integer())
-  {
-    bad(std::string(what) + ": \"" + key + "\" must be an integer");
-  }
-  return v.get<std::int64_t>();
-}
-
-std::string get_str(const json& j, const char* key, const char* what)
-{
-  const json& v = j.at(key);
-  if (!v.is_string())
-  {
-    bad(std::string(what) + ": \"" + key + "\" must be a string");
-  }
-  return v.get<std::string>();
-}
-
-GridKey get_key(const json& j, const char* key, const char* what)
+GridKey get_key(const json& j, const char* key, std::string_view what)
 {
   const std::string s = get_str(j, key, what);
   bool ok = s.size() == 16;
@@ -140,20 +67,10 @@ GridKey get_key(const json& j, const char* key, const char* what)
   }
   if (!ok)
   {
-    bad(
+    throw std::invalid_argument(
       std::string(what) + ": \"" + key + "\" must be 16 lowercase hex digits");
   }
   return std::stoull(s, nullptr, 16);
-}
-
-const json& get_array(const json& j, const char* key)
-{
-  const json& v = j.at(key);
-  if (!v.is_array())
-  {
-    bad(std::string("\"") + key + "\" must be an array");
-  }
-  return v;
 }
 
 // ---- paths ------------------------------------------------------------------
@@ -191,14 +108,7 @@ void check_path(const std::string& p, const std::string& prefix)
 
 std::string read_file(const fs::path& p)
 {
-  std::ifstream in(p, std::ios::binary);
-  if (!in)
-  {
-    throw std::runtime_error(std::string(kWho) + ": cannot read " + p.string());
-  }
-  std::ostringstream ss;
-  ss << in.rdbuf();
-  return ss.str();
+  return detail::read_text_file(p, kWho);
 }
 
 std::int64_t now_s()
@@ -308,6 +218,12 @@ std::string Manifest::file_name(std::uint64_t seq)
 
 void Manifest::validate() const
 {
+  if (sources.size() == 0)
+  {
+    // A manifest without source classes could not be read back
+    // (SourceRegistry::from_json requires at least one).
+    bad("no source classes");
+  }
   if (next_receipt_seq == 0)
   {
     bad("next_receipt_seq must be >= 1");
@@ -481,49 +397,50 @@ Manifest Manifest::from_json(const json& j)
   const json& st = j.at("stations");
   if (!st.is_null())
   {
-    check_keys(st, "stations", {"generation", "path", "header_crc"});
+    check_keys(st, "manifest: stations", {"generation", "path", "header_crc"});
     StationsEntry e;
-    e.generation = get_u64(st, "generation", "stations");
-    e.path = get_str(st, "path", "stations");
-    e.header_crc = get_u32(st, "header_crc", "stations");
+    e.generation = get_u64(st, "generation", "manifest: stations");
+    e.path = get_str(st, "path", "manifest: stations");
+    e.header_crc = get_u32(st, "header_crc", "manifest: stations");
     m.stations = e;
   }
-  for (const auto& g : get_array(j, "grids"))
+  for (const auto& g : detail::get_array(j, "grids", "manifest"))
   {
-    check_keys(g, "grid", {"key", "path", "header_crc"});
+    check_keys(g, "manifest: grid", {"key", "path", "header_crc"});
     GridEntry e;
-    e.key = get_key(g, "key", "grid");
-    e.path = get_str(g, "path", "grid");
-    e.header_crc = get_u32(g, "header_crc", "grid");
+    e.key = get_key(g, "key", "manifest: grid");
+    e.path = get_str(g, "path", "manifest: grid");
+    e.header_crc = get_u32(g, "header_crc", "manifest: grid");
     m.grids.push_back(std::move(e));
   }
-  for (const auto& f : get_array(j, "fields"))
+  for (const auto& f : detail::get_array(j, "fields", "manifest"))
   {
     check_keys(
-      f, "field", {"model", "run", "fhr", "grid_key", "path", "header_crc"});
+      f, "manifest: field",
+      {"model", "run", "fhr", "grid_key", "path", "header_crc"});
     FieldEntry e;
-    e.model = get_str(f, "model", "field");
-    e.run_s = get_i64(f, "run", "field");
-    e.fhr = get_u32(f, "fhr", "field");
-    e.grid_key = get_key(f, "grid_key", "field");
-    e.path = get_str(f, "path", "field");
-    e.header_crc = get_u32(f, "header_crc", "field");
+    e.model = get_str(f, "model", "manifest: field");
+    e.run_s = get_i64(f, "run", "manifest: field");
+    e.fhr = get_u32(f, "fhr", "manifest: field");
+    e.grid_key = get_key(f, "grid_key", "manifest: field");
+    e.path = get_str(f, "path", "manifest: field");
+    e.header_crc = get_u32(f, "header_crc", "manifest: field");
     m.fields.push_back(std::move(e));
   }
-  for (const auto& s : get_array(j, "segments"))
+  for (const auto& s : detail::get_array(j, "segments", "manifest"))
   {
     check_keys(
-      s, "segment",
+      s, "manifest: segment",
       {"source", "bucket_start", "path", "receipt_seq_min", "receipt_seq_max",
        "report_count", "header_crc"});
     SegmentEntry e;
-    e.source = get_str(s, "source", "segment");
-    e.bucket_start_s = get_i64(s, "bucket_start", "segment");
-    e.path = get_str(s, "path", "segment");
-    e.receipt_seq_min = get_u64(s, "receipt_seq_min", "segment");
-    e.receipt_seq_max = get_u64(s, "receipt_seq_max", "segment");
-    e.report_count = get_u64(s, "report_count", "segment");
-    e.header_crc = get_u32(s, "header_crc", "segment");
+    e.source = get_str(s, "source", "manifest: segment");
+    e.bucket_start_s = get_i64(s, "bucket_start", "manifest: segment");
+    e.path = get_str(s, "path", "manifest: segment");
+    e.receipt_seq_min = get_u64(s, "receipt_seq_min", "manifest: segment");
+    e.receipt_seq_max = get_u64(s, "receipt_seq_max", "manifest: segment");
+    e.report_count = get_u64(s, "report_count", "manifest: segment");
+    e.header_crc = get_u32(s, "header_crc", "manifest: segment");
     m.segments.push_back(std::move(e));
   }
   m.validate();
@@ -532,16 +449,7 @@ Manifest Manifest::from_json(const json& j)
 
 Manifest Manifest::from_text(std::string_view text)
 {
-  json j;
-  try
-  {
-    j = json::parse(text.begin(), text.end());
-  }
-  catch (const json::exception& e)
-  {
-    bad(std::string("invalid JSON: ") + e.what());
-  }
-  return from_json(j);
+  return from_json(detail::parse_json(text, kWho));
 }
 
 // ---------------------------------------------------------------------------

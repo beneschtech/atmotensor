@@ -86,3 +86,26 @@ Q7 [answered 2026-11-05] Ref allocation for provisional stations. Both the web a
     = 2^31, max_ref() / max_provisional_ref(), Station::merged_into (target
     must exist and not be merged itself). Test:
     `stations_ref_ranges_and_merge`. The outbox file format is part of T5b.
+Q8 [open] Reference-data import policy (T5b). The spec did not pin these
+    down; implemented as below (conservative), please confirm or change:
+    a) Removing or renaming a source class in sources.json while segments
+       of it are still in the manifest: the export is rejected (previous
+       classes stay) until those segments expire. Alternative: drop the
+       segments (loses irreplaceable observations) or keep a hidden copy
+       of the old class.
+    b) A web-app ref ([1, 2^31)) of the current generation missing from
+       stations.json rejects the export; a provisional ref missing from it
+       is kept (not imported by the web app yet); the export may not
+       contain provisional refs ingest never assigned.
+    c) Outbox: one file per station generation listing all provisional
+       stations not yet in the last valid stations.json, so the web-app
+       import must be idempotent by ref (documented in
+       05-reference-data.md). Chosen because it heals itself after a crash
+       between publishing and writing the file.
+    d) Nothing is published until a valid sources.json exists (the web app
+       seeds it from SourceRegistry::defaults()); Manifest::validate now
+       requires at least one source class.
+    e) Errors are only returned to the caller (RefImportReport.errors); the
+       web app cannot see them. Should ingest write e.g.
+       config/outbox/import-status.json so the admin UI can show "export
+       rejected: ..."?

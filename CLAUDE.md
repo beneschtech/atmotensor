@@ -73,6 +73,11 @@ and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
 - `include/atmo/snapshot.h` Snapshot (every file of one manifest opened up
   front and checked against its entry, ObsIndex), SnapshotLoader
   (refresh()/current() over an atomic shared_ptr, reuses unchanged mappings)
+- `include/atmo/refdata.h` StationsExport (stations.json / outbox JSON),
+  RefDataImporter: config/sources.json + stations.json -> manifest (next
+  station generation), provisional stations + config/outbox/ (Q7, Q8)
+- `src/jsonutil.h/.cpp` internal: strict JSON field helpers (check_keys,
+  get_u64/..., check_format, parse_json); all errors std::invalid_argument
 - `src/fileio.h/.cpp` internal: publish_file (temp+fsync+link+dir fsync),
   MappedFile, align_up; shared by every immutable-file writer/reader
 - `third_party/`  vendored single headers (nlohmann/json 3.11.3, MIT); see

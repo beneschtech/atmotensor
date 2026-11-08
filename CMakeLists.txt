@@ -41,10 +41,12 @@ add_library(atmo STATIC
   src/geo.cpp
   src/grid.cpp
   src/gridstore.cpp
+  src/jsonutil.cpp
   src/manifest.cpp
   src/fileio.cpp
   src/obs_index.cpp
   src/obs_segment.cpp
+  src/refdata.cpp
   src/snapshot.cpp
   src/source.cpp
   src/stations.cpp)
@@ -71,7 +73,7 @@ endif()
 
 if(ATMO_BUILD_TESTS)
   enable_testing()
-  foreach(t kdtree grid source obs obs_index stations manifest)
+  foreach(t kdtree grid source obs obs_index stations manifest refdata)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} PRIVATE atmo_testkit)
     atmo_target_defaults(test_${t})
