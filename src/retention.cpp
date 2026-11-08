@@ -45,6 +45,10 @@ RetentionResult apply_retention(
   {
     runs[f.model].insert(f.run_s);
   }
+  for (const auto& g : m.gribs)
+  {
+    runs[g.model].insert(g.run_s);
+  }
   std::map<std::string, std::set<std::int64_t>> kept_runs;
   for (const auto& [model, times] : runs)
   {
@@ -63,6 +67,20 @@ RetentionResult apply_retention(
     {
       out.fields.push_back(f);
       used.insert(f.grid_key);
+    }
+    else
+    {
+      ++r.fields_expired;
+    }
+  }
+
+  out.gribs.clear();
+  for (const auto& g : m.gribs)
+  {
+    if (kept_runs[g.model].count(g.run_s))
+    {
+      out.gribs.push_back(g);
+      used.insert(g.grids.begin(), g.grids.end());
     }
     else
     {

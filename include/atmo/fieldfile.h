@@ -66,6 +66,8 @@ struct FieldInfo
   float max = 0.0f;
 
   bool same_field(const FieldInfo& o) const;
+  // All members (min/max included: NaN never compares equal).
+  bool operator==(const FieldInfo&) const = default;
 };
 
 namespace fieldfile

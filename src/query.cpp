@@ -7,6 +7,7 @@
 #include <ctime>
 #include <limits>
 #include <map>
+#include <set>
 #include <stdexcept>
 
 #include "atmo/snapshot.h"
@@ -339,20 +340,57 @@ std::int64_t ModelTime::valid_s() const
 
 FieldStore::~FieldStore() = default;
 
-SnapshotFieldStore::SnapshotFieldStore(std::shared_ptr<const Snapshot> s)
-    : snap_(std::move(s))
+SnapshotFieldStore::SnapshotFieldStore(
+  std::shared_ptr<const Snapshot> s,
+  GribCache* cache)
+    : snap_(std::move(s)), cache_(cache)
 {
-  std::map<std::string, std::vector<ModelTime>> by_model;
+  std::map<std::string, std::set<std::pair<std::int64_t, std::uint32_t>>>
+    by_model;
   for (const auto& f : snap_->manifest().fields)
   {
-    by_model[f.model].push_back(ModelTime{f.run_s, f.fhr});
+    by_model[f.model].insert({f.run_s, f.fhr});
+  }
+  const auto& gribs = snap_->manifest().gribs;
+  const auto& idxs = snap_->grib_indexes();
+  grib_files_.reserve(gribs.size());  // stable addresses for GribMsg::file
+  for (const auto& g : gribs)
+  {
+    grib_files_.push_back(snap_->root() / g.path);
+  }
+  for (std::size_t i = 0; i < gribs.size(); ++i)
+  {
+    for (const auto& e : idxs[i]->entries)
+    {
+      by_model[gribs[i].model].insert({gribs[i].run_s, e.fhr});
+      GribSlice& sl = gribs_[{gribs[i].model, gribs[i].run_s, e.fhr}];
+      if (sl.msgs.empty())
+      {
+        sl.grid = e.grid;
+      }
+      if (e.grid != sl.grid)
+      {
+        continue;
+      }
+      bool dup = false;
+      for (const auto& m : sl.msgs)
+      {
+        dup = dup || m.entry->info.same_field(e.info);
+      }
+      if (!dup)
+      {
+        sl.msgs.push_back(GribMsg{&grib_files_[i], &e});
+      }
+    }
   }
   for (auto& [m, v] : by_model)
   {
-    std::sort(
-      v.begin(), v.end(), [](const ModelTime& a, const ModelTime& b)
-      { return a.run_s != b.run_s ? a.run_s < b.run_s : a.fhr < b.fhr; });
-    times_.push_back({m, std::move(v)});
+    std::vector<ModelTime> t;
+    for (const auto& [run, fhr] : v)
+    {
+      t.push_back(ModelTime{run, fhr});
+    }
+    times_.push_back({m, std::move(t)});
   }
 }
 
@@ -387,12 +425,24 @@ std::shared_ptr<const FieldFile> SnapshotFieldStore::file(
   return snap_->field_file(model, t.run_s, t.fhr);
 }
 
+const SnapshotFieldStore::GribSlice* SnapshotFieldStore::grib_slice(
+  std::string_view model,
+  const ModelTime& t) const
+{
+  auto it = gribs_.find({std::string(model), t.run_s, t.fhr});
+  return it == gribs_.end() ? nullptr : &it->second;
+}
+
 std::shared_ptr<const Grid> SnapshotFieldStore::grid(
   std::string_view model,
   const ModelTime& t) const
 {
-  auto f = file(model, t);
-  return f ? snap_->grid(f->grid_key()) : nullptr;
+  if (auto f = file(model, t))
+  {
+    return snap_->grid(f->grid_key());
+  }
+  const GribSlice* sl = grib_slice(model, t);
+  return sl ? snap_->grid(sl->grid) : nullptr;
 }
 
 std::vector<FieldInfo> SnapshotFieldStore::fields(
@@ -406,6 +456,17 @@ std::vector<FieldInfo> SnapshotFieldStore::fields(
     {
       v.push_back(f->field(k));
     }
+    return v;
+  }
+  if (const GribSlice* sl = grib_slice(model, t))
+  {
+    for (const auto& m : sl->msgs)
+    {
+      FieldInfo fi = m.entry->info;
+      fi.min = std::numeric_limits<float>::quiet_NaN();  // not indexed
+      fi.max = fi.min;
+      v.push_back(fi);
+    }
   }
   return v;
 }
@@ -416,13 +477,46 @@ float SnapshotFieldStore::sample(
   const FieldKey& key,
   const Grid::Cell& cell) const
 {
-  auto f = file(model, t);
-  if (!f)
+  constexpr float nan = std::numeric_limits<float>::quiet_NaN();
+  if (auto f = file(model, t))
   {
-    return std::numeric_limits<float>::quiet_NaN();
+    auto k = f->find(key.param_id, key.level_type, key.level_value);
+    return k ? f->sample(*k, cell) : nan;
   }
-  auto k = f->find(key.param_id, key.level_type, key.level_value);
-  return k ? f->sample(*k, cell) : std::numeric_limits<float>::quiet_NaN();
+  const GribSlice* sl = grib_slice(model, t);
+  if (!sl || !cache_)
+  {
+    return nan;
+  }
+  FieldInfo want;
+  want.param_id = key.param_id;
+  want.level_type = key.level_type;
+  want.level_value = key.level_value;
+  for (const auto& m : sl->msgs)
+  {
+    if (!m.entry->info.same_field(want))
+    {
+      continue;
+    }
+    auto g = snap_->grid(sl->grid);
+    if (
+      !g || cell.j + 1 >= g->nj() ||
+      (g->periodic_i() ? cell.i >= g->ni() : cell.i + 1 >= g->ni()))
+    {
+      return nan;
+    }
+    auto d = cache_->get(*m.file, *m.entry, g);
+    const std::uint32_t i1 = cell.i + 1 == g->ni() ? 0 : cell.i + 1;
+    const double* v = d->values.data();
+    const double v00 = v[g->index(cell.i, cell.j)];
+    const double v10 = v[g->index(i1, cell.j)];
+    const double v01 = v[g->index(cell.i, cell.j + 1)];
+    const double v11 = v[g->index(i1, cell.j + 1)];
+    return static_cast<float>(
+      (1.0 - cell.fy) * ((1.0 - cell.fx) * v00 + cell.fx * v10) +
+      cell.fy * ((1.0 - cell.fx) * v01 + cell.fx * v11));
+  }
+  return nan;
 }
 
 // ---------------------------------------------------------------------------

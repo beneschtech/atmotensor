@@ -307,6 +307,32 @@ void Manifest::validate() const
     add_path(f.path);
   }
 
+  for (const auto& g : gribs)
+  {
+    if (!SourceClass::valid_name(g.model))
+    {
+      bad("grib: bad model name \"" + g.model + "\"");
+    }
+    check_path(g.path, "grib/" + g.model);
+    if (g.index_path != g.path + ".idx.json")
+    {
+      bad("grib " + g.path + ": index_path must be path + \".idx.json\"");
+    }
+    if (g.grids.empty())
+    {
+      bad("grib " + g.path + ": no grids");
+    }
+    for (GridKey k : g.grids)
+    {
+      if (!keys.count(k))
+      {
+        bad("grib " + g.path + ": grid " + key_hex(k) + " not listed");
+      }
+    }
+    add_path(g.path);
+    add_path(g.index_path);
+  }
+
   for (const auto& s : segments)
   {
     if (!sources.find(s.source))
@@ -339,7 +365,7 @@ void Manifest::validate() const
   for (const auto& r : retired)
   {
     bool under_kind = false;
-    for (const char* kind : {"grids", "stations", "fields", "obs"})
+    for (const char* kind : {"grids", "stations", "fields", "grib", "obs"})
     {
       const std::string pre = std::string(kind) + "/";
       under_kind = under_kind || r.path.compare(0, pre.size(), pre) == 0;
@@ -367,6 +393,11 @@ std::vector<std::string> Manifest::live_paths() const
   for (const auto& f : fields)
   {
     v.push_back(f.path);
+  }
+  for (const auto& g : gribs)
+  {
+    v.push_back(g.path);
+    v.push_back(g.index_path);
   }
   for (const auto& e : segments)
   {
@@ -416,6 +447,24 @@ json Manifest::to_json() const
        {"header_crc", e.header_crc}});
   }
   j["fields"] = std::move(f);
+  json gr = json::array();
+  for (const auto& e : gribs)
+  {
+    json keys = json::array();
+    for (GridKey k : e.grids)
+    {
+      keys.push_back(key_hex(k));
+    }
+    gr.push_back(
+      {{"model", e.model},
+       {"run", e.run_s},
+       {"path", e.path},
+       {"index_path", e.index_path},
+       {"index_crc", e.index_crc},
+       {"size", e.size},
+       {"grids", std::move(keys)}});
+  }
+  j["gribs"] = std::move(gr);
   json s = json::array();
   for (const auto& e : segments)
   {
@@ -449,7 +498,7 @@ Manifest Manifest::from_json(const json& j)
   check_keys(
     j, "manifest",
     {"format", "version", "seq", "created_at", "next_receipt_seq", "sources",
-     "stations", "grids", "fields", "segments", "retired"});
+     "stations", "grids", "fields", "gribs", "segments", "retired"});
   if (!j.at("format").is_string() || j.at("format") != kFormat)
   {
     bad(std::string("\"format\" must be \"") + kFormat + "\"");
@@ -496,6 +545,29 @@ Manifest Manifest::from_json(const json& j)
     e.path = get_str(f, "path", "manifest: field");
     e.header_crc = get_u32(f, "header_crc", "manifest: field");
     m.fields.push_back(std::move(e));
+  }
+  for (const auto& g : detail::get_array(j, "gribs", "manifest"))
+  {
+    check_keys(
+      g, "manifest: grib",
+      {"model", "run", "path", "index_path", "index_crc", "size", "grids"});
+    GribEntry e;
+    e.model = get_str(g, "model", "manifest: grib");
+    e.run_s = get_i64(g, "run", "manifest: grib");
+    e.path = get_str(g, "path", "manifest: grib");
+    e.index_path = get_str(g, "index_path", "manifest: grib");
+    e.index_crc = get_u32(g, "index_crc", "manifest: grib");
+    e.size = get_u64(g, "size", "manifest: grib");
+    for (const auto& k : detail::get_array(g, "grids", "manifest: grib"))
+    {
+      if (!k.is_string())
+      {
+        bad("grib: grid keys must be strings");
+      }
+      json one{{"k", k}};
+      e.grids.push_back(get_key(one, "k", "manifest: grib"));
+    }
+    m.gribs.push_back(std::move(e));
   }
   for (const auto& s : detail::get_array(j, "segments", "manifest"))
   {
@@ -773,6 +845,11 @@ const Manifest& ManifestPublisher::publish_impl(
   {
     must_exist(f.path);
   }
+  for (const auto& g : next.gribs)
+  {
+    must_exist(g.path);
+    must_exist(g.index_path);
+  }
   for (const auto& s : next.segments)
   {
     must_exist(s.path);
@@ -868,7 +945,7 @@ GcReport ManifestPublisher::collect_garbage(std::int64_t grace_s)
   {
     named.insert(r.path);
   }
-  for (const char* kind : {"grids", "stations", "fields", "obs", "tmp"})
+  for (const char* kind : {"grids", "stations", "fields", "grib", "obs", "tmp"})
   {
     const fs::path top = root_ / kind;
     std::error_code ec;

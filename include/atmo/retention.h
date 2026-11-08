@@ -39,8 +39,9 @@ struct RetentionResult
 //   * a segment expires when bucket_start + bucket_seconds (its own bucket
 //     length) < now - retain_seconds of its source class, so every version
 //     in a bucket expires together;
-//   * fields: per model, the newest K distinct run times stay (all their
-//     forecast hours), older runs expire whole;
+//   * fields and GRIB files: per model, the newest K distinct run times
+//     stay (all their forecast hours), older runs expire whole (both count
+//     in fields_expired);
 //   * a grid that no remaining field uses expires.
 // Stations, seq, sources and next_receipt_seq are untouched.
 RetentionResult apply_retention(

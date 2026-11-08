@@ -1,8 +1,10 @@
 // GRIB2 ingest (T11).  Test GRIB files are generated with eccodes itself
 // (no binary fixtures): IEEE packing so values round-trip exactly.
 #include <eccodes.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -17,7 +19,10 @@
 
 #include "atmo/fieldfile.h"
 #include "atmo/grib.h"
+#include "atmo/gribstore.h"
+#include "atmo/http_api.h"
 #include "atmo/manifest.h"
+#include "atmo/query.h"
 #include "atmo/snapshot.h"
 #include "atmo/source.h"
 #include "atmo/variables.h"
@@ -572,6 +577,191 @@ TEST(grib_errors)
   CHECK(
     throws<std::runtime_error>([&]
                                { ingest_grib(td.p, {trunc}, opts("ruc")); }));
+}
+
+// ---------------------------------------------------------------------------
+// GRIB-native store (T10c)
+// ---------------------------------------------------------------------------
+
+TEST(grib_native_matches_tiles)
+{
+  TempDir td;
+  // Several fields and two forecast hours in one file, like ECMWF steps.
+  std::vector<Msg> msgs;
+  for (int fhr : {0, 1})
+  {
+    Msg t2 = at_level(Msg{}, 103, 2);
+    t2.ni = 40;
+    t2.nj = 30;
+    t2.fhr = fhr;
+    t2.f = [fhr](double lat, double lon)
+    { return analytic(lat, lon) + fhr + 0.01 * lat * lon; };
+    Msg u = at_level(param(0, 2, 2), 103, 10);
+    u.ni = 40;
+    u.nj = 30;
+    u.fhr = fhr;
+    u.f = [](double lat, double) { return lat - 40.0; };
+    msgs.push_back(t2);
+    msgs.push_back(u);
+  }
+  msgs.push_back(param(0, 16, 196));  // skipped
+  fs::create_directories(td.p / "ingest");
+  const fs::path src = write_grib(td.p / "ingest/model.grib2", msgs);
+
+  const GribNativeResult r = index_grib(td.p, src, opts("nat"));
+  CHECK(r.index.entries.size() == 4);
+  CHECK(r.index.messages_total == 5);
+  CHECK(r.index.skipped.size() == 1);
+  CHECK(r.entry.path == "grib/nat/2025110509/model.grib2");
+  CHECK(r.entry.index_path == r.entry.path + ".idx.json");
+  CHECK(r.grids.size() == 1 && r.entry.grids.size() == 1);
+  // Kept as published: a hard link to the very same bytes.
+  struct stat a, b;
+  ::stat(src.c_str(), &a);
+  ::stat((td.p / r.entry.path).c_str(), &b);
+  CHECK(a.st_ino == b.st_ino);
+  CHECK(fs::exists(td.p / r.entry.index_path));
+  CHECK(
+    throws<std::runtime_error>([&] { index_grib(td.p, src, opts("nat")); }));
+
+  // The same messages as T7 tiles, per hour, under another model name.
+  for (int fhr : {0, 1})
+  {
+    std::vector<Msg> hour;
+    for (const auto& m : msgs)
+      if (
+        m.fhr == fhr && m.sample == std::string("regular_ll_sfc_grib2") &&
+        m.discipline == 0 && m.category != 16)
+        hour.push_back(m);
+    write_grib(td.p / ("h" + std::to_string(fhr) + ".grib2"), hour);
+  }
+  const auto t0 = ingest_grib(td.p, {td.p / "h0.grib2"}, opts("til"));
+  const auto t1 = ingest_grib(td.p, {td.p / "h1.grib2"}, opts("til"));
+
+  ManifestPublisher pub(td.p);
+  Manifest m;
+  m.sources = SourceRegistry::defaults();
+  add_to_manifest(m, r);
+  CHECK(throws<std::invalid_argument>([&] { add_to_manifest(m, r); }));
+  add_to_manifest(m, t0);
+  add_to_manifest(m, t1);
+  pub.publish(m);
+  SnapshotLoader l(td.p);
+  CHECK(l.refresh());
+  auto snap = l.current();
+  CHECK(snap->grib_indexes().size() == 1);
+
+  GribCache cache({}, grib_decoder());
+  SnapshotFieldStore store(snap, &cache);
+  CHECK(store.models() == std::vector<std::string>({"nat", "til"}));
+  CHECK(store.times("nat").size() == 2);
+  CHECK(store.fields("nat", store.times("nat")[0]).size() == 2);
+
+  std::mt19937 rng(5);
+  std::uniform_real_distribution<double> ula(30.5, 58.0), ulo(260.5, 298.0);
+  double worst = 0.0;
+  for (int n = 0; n < 200; ++n)
+  {
+    PointQuery q;
+    q.lat_deg = ula(rng);
+    q.lon_deg = ulo(rng);
+    q.t_s = kRun + 1800;  // between the two hours
+    q.fields = {
+      FieldSpec::parse("air_temperature@2m"), FieldSpec::parse("wind_u@10m")};
+    const PointResult res = point(store, nullptr, snap->sources(), q);
+    CHECK(res.values.size() == 4);
+    for (std::size_t k = 0; k < 2; ++k)
+    {
+      CHECK(res.values[k].model == "nat" && res.values[k + 2].model == "til");
+      CHECK(res.values[k].status == PointValue::Status::ok);
+      worst = std::max(
+        worst, std::fabs(res.values[k].value - res.values[k + 2].value));
+    }
+  }
+  // Native interpolates the doubles, tiles the stored floats.
+  CHECK(worst < 1e-3);
+  const auto st = cache.stats();
+  CHECK(st.misses == 4);  // two fields x two hours, decoded once each
+  CHECK(st.hits > 700);
+
+  // Bytes changed on disk: the hash check refuses the message.
+  GribCache cold({}, grib_decoder());
+  SnapshotFieldStore store2(snap, &cold);
+  {
+    std::fstream f(
+      td.p / r.entry.path, std::ios::in | std::ios::out | std::ios::binary);
+    f.seekp(static_cast<std::streamoff>(r.index.entries[0].offset + 200));
+    f.put('\x55');
+  }
+  PointQuery q;
+  q.lat_deg = 40.0;
+  q.lon_deg = 270.0;
+  q.t_s = kRun;
+  q.fields = {FieldSpec::parse("air_temperature@2m")};
+  q.models = {"nat"};
+  CHECK(
+    throws<std::runtime_error>(
+      [&] { point(store2, nullptr, snap->sources(), q); }));
+  // Without a cache native data is listed but has no values.
+  SnapshotFieldStore nocache(snap);
+  CHECK(
+    std::isnan(point(nocache, nullptr, snap->sources(), q).values[0].value));
+}
+
+TEST(grib_native_errors_and_api)
+{
+  TempDir td;
+  Msg other_run;
+  other_run.time = 1200;
+  const fs::path mixed = write_grib(td.p / "mixed.grib2", {Msg{}, other_run});
+  CHECK(
+    throws<std::runtime_error>([&] { index_grib(td.p, mixed, opts("m")); }));
+  const fs::path useless =
+    write_grib(td.p / "useless.grib2", {param(0, 16, 196)});
+  CHECK(
+    throws<std::runtime_error>([&] { index_grib(td.p, useless, opts("m")); }));
+  CHECK(
+    throws<std::invalid_argument>([&]
+                                  { index_grib(td.p, useless, opts("BAD")); }));
+  // Nothing was left behind by the failures.
+  CHECK(!fs::exists(td.p / "grib"));
+
+  // Served through the HTTP API with a cache.
+  Msg t = at_level(Msg{}, 103, 2);
+  const fs::path f = write_grib(td.p / "ok.grib2", {t});
+  const GribNativeResult r = index_grib(td.p, f, opts("gfs"));
+  ManifestPublisher pub(td.p);
+  Manifest m;
+  m.sources = SourceRegistry::defaults();
+  add_to_manifest(m, r);
+  pub.publish(m);
+  SnapshotLoader l(td.p);
+  CHECK(l.refresh());
+  GribCache cache({}, grib_decoder());
+  QueryApi api(td.p, l, 4, &cache);
+  fcgi::Request req;
+  req.params["DOCUMENT_URI"] = "/v1/point";
+  req.params["REQUEST_METHOD"] = "GET";
+  req.params["QUERY_STRING"] =
+    "lat=31&lon=262&time=2025-11-05T12:00:00Z&fields=air_temperature@2m";
+  const auto resp = api.handle(req);
+  CHECK(resp.status == 200);
+  const auto j = nlohmann::json::parse(resp.body);
+  CHECK(
+    std::fabs(j["values"][0]["value"].get<double>() - analytic(31.0, 262.0)) <
+    1e-3);
+  const auto meta = nlohmann::json::parse(api
+                                            .handle(
+                                              []
+                                              {
+                                                fcgi::Request r2;
+                                                r2.params["DOCUMENT_URI"] =
+                                                  "/v1/meta";
+                                                return r2;
+                                              }())
+                                            .body);
+  CHECK(meta["models"][0]["name"] == "gfs");
+  CHECK(meta["models"][0]["fields"] == nlohmann::json({"air_temperature@2m"}));
 }
 
 int main()

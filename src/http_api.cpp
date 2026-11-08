@@ -169,8 +169,12 @@ std::map<std::string, std::string> parse_query_string(std::string_view qs)
 QueryApi::QueryApi(
   fs::path root,
   SnapshotLoader& loader,
-  std::size_t pinned_cache)
-    : root_(std::move(root)), loader_(loader), pinned_cache_(pinned_cache)
+  std::size_t pinned_cache,
+  GribCache* grib_cache)
+    : root_(std::move(root)),
+      loader_(loader),
+      pinned_cache_(pinned_cache),
+      grib_cache_(grib_cache)
 {
 }
 
@@ -182,7 +186,8 @@ QueryApi::View QueryApi::view(std::uint64_t pinned_seq) const
   std::lock_guard<std::mutex> lk(mu_);
   if (cur && current_.snap != cur)
   {
-    current_ = View{cur, std::make_shared<SnapshotFieldStore>(cur), false};
+    current_ =
+      View{cur, std::make_shared<SnapshotFieldStore>(cur, grib_cache_), false};
   }
   if (pinned_seq == 0 || (cur && cur->seq() == pinned_seq))
   {
@@ -222,7 +227,7 @@ QueryApi::View QueryApi::view(std::uint64_t pinned_seq) const
         " can no longer be opened: " + e.what());
   }
   pinned_.push_front(
-    View{snap, std::make_shared<SnapshotFieldStore>(snap), true});
+    View{snap, std::make_shared<SnapshotFieldStore>(snap, grib_cache_), true});
   while (pinned_.size() > pinned_cache_)
   {
     pinned_.pop_back();

@@ -25,16 +25,20 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "atmo/fieldfile.h"
+#include "atmo/gribstore.h"
 #include "atmo/grid.h"
 #include "atmo/obs_index.h"
 #include "atmo/variable.h"
@@ -94,11 +98,18 @@ class FieldStore
     const Grid::Cell& cell) const = 0;
 };
 
-// FieldStore over the field files of a snapshot (T7).
+// FieldStore over a snapshot: T7 field files and GRIB-native files
+// (T10c).  GRIB messages are decoded on demand through `cache`; without a
+// cache they are listed but sample to NaN.  Several GRIB files may serve
+// one (model, run, fhr) (e.g. HRRR wrfsfc + wrfprs): their messages are
+// merged, the first listed wins on duplicates, messages on a grid other
+// than the first one's are ignored.
 class SnapshotFieldStore : public FieldStore
 {
  public:
-  explicit SnapshotFieldStore(std::shared_ptr<const Snapshot> snapshot);
+  explicit SnapshotFieldStore(
+    std::shared_ptr<const Snapshot> snapshot,
+    GribCache* cache = nullptr);
   ~SnapshotFieldStore() override;
 
   std::vector<std::string> models() const override;
@@ -118,8 +129,24 @@ class SnapshotFieldStore : public FieldStore
     std::string_view model,
     const ModelTime& t) const;
 
+  struct GribMsg
+  {
+    const std::filesystem::path* file;
+    const GribIndexEntry* entry;
+  };
+  struct GribSlice
+  {
+    GridKey grid = 0;
+    std::vector<GribMsg> msgs;
+  };
+  const GribSlice* grib_slice(std::string_view model, const ModelTime& t) const;
+
   std::shared_ptr<const Snapshot> snap_;
+  GribCache* cache_ = nullptr;
   std::vector<std::pair<std::string, std::vector<ModelTime>>> times_;
+  std::vector<std::filesystem::path> grib_files_;  // absolute
+  std::map<std::tuple<std::string, std::int64_t, std::uint32_t>, GribSlice>
+    gribs_;
 };
 
 struct FieldSpec
