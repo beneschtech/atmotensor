@@ -29,6 +29,8 @@ CMake only (CLion); presets in CMakePresets.json: default, asan, ci.
     # options: ATMO_SANITIZE ATMO_WERROR ATMO_BUILD_TESTS ATMO_BUILD_BENCH
     #          ATMO_WITH_ECCODES=AUTO|ON|OFF, ECCODES_ROOT=/prefix
     ./build-cmake/atmo_grib_ingest --root DIR --model gfs [--seed-sources] F.grib2
+    ./build-cmake/atmo_queryd --root DIR --socket /run/atmo/query.sock  # behind nginx
+    # example nginx site: deploy/nginx-atmo.conf
 
 No Catch2/gtest: tests use the tiny harness in `tests/check.h` (TEST, CHECK,
 CHECK_NEAR; non-fatal). Keep new tests dependency-free. `-ffp-contract=off` is
@@ -72,6 +74,11 @@ and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
 - `include/atmo/query.h` point() engine: FieldStore interface (T7 files via
   SnapshotFieldStore; GRIB-native store later, Q10), field specs
   `name@level`, time/log-p/altitude interpolation, wind rotation, JSON
+- `include/atmo/fcgi.h` in-house FastCGI responder: Connection (protocol
+  state machine, no I/O), Server (poll I/O thread + worker pool, 503/504)
+- `include/atmo/http_api.h` QueryApi (/healthz, /v1/meta, /v1/point,
+  ?snapshot= pinning), SnapshotWatcher (inotify + poll); daemon in
+  `tools/atmo_queryd.cpp`
 - `include/atmo/crc32.h`    CRC-32 (zlib-compatible)
 - `include/atmo/source.h`   SourceClass (metric per source class),
   SourceRegistry (JSON config)

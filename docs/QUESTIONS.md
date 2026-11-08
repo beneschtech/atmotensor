@@ -170,3 +170,9 @@ Q11 [open] /v1/point details the sketch left open (T9, query.h). As
        level_required, out_of_levels) so the web UI can explain gaps.
     e) obs_radius_km is a radius in each source class's space-time metric
        (time offsets count as distance via lambda), not pure distance.
+    f) (T10) `time` is required on /v1/point (no "now" default), so equal
+       requests on one snapshot give byte-identical responses as the spec
+       demands; the web UI passes the time it shows.
+    g) (T10) ?snapshot=<seq> responses are Cache-Control: public,
+       max-age=86400; live ones no-store. A pinned snapshot whose files
+       expired answers 410, one no longer retained 404.

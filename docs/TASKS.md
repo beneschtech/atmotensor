@@ -69,13 +69,21 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       Done: `query.h` (FieldStore interface + SnapshotFieldStore, FieldSpec,
       point(), to_json, meta_json). Storage-agnostic for Q10. API details:
       Q11.
-- [ ] T10 FastCGI responder library (`include/atmo/fcgi.h`, spec and tests
+- [x] T10 FastCGI responder library (`include/atmo/fcgi.h`, spec and tests
       in 04-query-api.md "FastCGI front end"), then the query daemon skeleton:
       /healthz, /v1/meta, /v1/point over T9. Includes (from T5): watch
       manifest/CURRENT with inotify + 1 s polling fallback calling
       SnapshotLoader::refresh(), and `?snapshot=<seq>` pinning of a
       retained snapshot. Can start independently of T2-T9
       using a stub handler. Provide an example nginx config under `deploy/`.
+      Done: `fcgi.h` (Connection state machine, Server: poll I/O thread +
+      worker pool, 503 on a full queue, 504 past the queue deadline),
+      `http_api.h` (QueryApi: /healthz, /v1/meta, /v1/point, ?snapshot=
+      pinning with an LRU of opened snapshots, SnapshotWatcher: inotify +
+      1 s poll), `tools/atmo_queryd`, `deploy/nginx-atmo.conf`. Tested
+      through a real nginx (test_fcgi) and on the GFS 0.25 store (0.13 ms
+      per point query through nginx). Not yet: /v1/route, /v1/tiles,
+      /v1/obs, ?units=, SIGHUP config reload (no config file yet).
 - [x] T11 Ingest: GRIB2 via eccodes -> GridStore + field files. Identity bytes
       = GRIB2 section 3 octets; normalise scan modes; convert to SI. eccodes
       comes from the distro package (D9). CMake: auto-detect (CONFIG package,
