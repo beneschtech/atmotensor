@@ -2,7 +2,7 @@
 // serving /healthz, /v1/meta and /v1/point over the published snapshots
 // (04-query-api.md).  Read-only on the store.
 //
-//   atmo_queryd --root /atmotensor [--socket /run/atmo/query.sock]
+//   atmo_queryd --root /opt/atmotensor/data [--socket /run/atmo/query.sock]
 //               [--tcp-port N] [--threads N] [--queue N]
 //
 // SIGTERM/SIGINT: stop accepting, finish in-flight requests, exit.

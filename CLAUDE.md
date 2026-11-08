@@ -3,7 +3,8 @@
 Own-hardware weather data engine. Customers query it; it stores gridded model
 data (GFS, RRFS, HRRR, ...) and observations (METAR/SYNOP, soundings, TAF,
 PIREP, ...) and answers point, flight-route and area-product queries. Name:
-AtmoTensor; C++ namespace `atmo`; planned mount `/atmotensor`. C++20, Linux,
+AtmoTensor; C++ namespace `atmo`; store root `/opt/atmotensor/data` (tmp `/opt/atmotensor/tmp`,
+feeds `/opt/atmotensor/ingest/<source>`; see deploy/README.md). C++20, Linux,
 static library `libatmo` (.h declarations + src/*.cpp). Owner: Chris (C++ /
 Qt / Symfony background, AIX-era storage instincts, wants to avoid
 third-party/hosted dependencies).
@@ -30,7 +31,7 @@ CMake only (CLion); presets in CMakePresets.json: default, asan, ci.
     #          ATMO_WITH_ECCODES=AUTO|ON|OFF, ECCODES_ROOT=/prefix
     ./build-cmake/atmo_grib_ingest --root DIR --model gfs [--seed-sources] F.grib2
     ./build-cmake/atmo_queryd --root DIR --socket /run/atmo/query.sock  # behind nginx
-    # example nginx site: deploy/nginx-atmo.conf
+    # deploy: deploy/README.md (nginx snippet + systemd unit); API contract: docs/api/query-api-v1.md
 
 No Catch2/gtest: tests use the tiny harness in `tests/check.h` (TEST, CHECK,
 CHECK_NEAR; non-fatal). Keep new tests dependency-free. `-ffp-contract=off` is
@@ -41,7 +42,7 @@ Run the asan preset after touching anything with pointers or file I/O.
 
 `../web` (Symfony 7.4) owns MySQL and its schema (Doctrine migrations). The
 engine never connects to MySQL: the web app exports reference data
-(source classes, stations, ...) as JSON files into `/atmotensor/config/`,
+(source classes, stations, ...) as JSON files into `/opt/atmotensor/data/config/`,
 and ingest publishes them through the manifest. Contract:
 `docs/design/05-reference-data.md` (D10).
 

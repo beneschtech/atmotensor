@@ -154,6 +154,30 @@ Q10 [decided by Chris 2026-11-08, design open] Store GRIB natively.
     Meanwhile T9 reads gridded data through a FieldStore interface
     (query.h), so a GRIB-native store can replace the T7 field files
     without touching the query code.
+    Chris's design direction (2026-11-08): GRIB messages are not generic
+    nodes. Keep a map { message id (string or other unique id) ->
+    { decoded message, last accessed } }; recently used messages are ready
+    for iteration/indexing. When a new entry is added, purge by total map
+    size and last access, oldest unused first. The size of the data is not
+    known up front, so check the process size in /proc to decide when to
+    purge. Never purge in the middle of a query (memory may spike, then
+    recover: GRIB queries are not continuous); possibly a forced cleanup
+    cycle if memory gets out of control.
+    Implementation notes (to confirm before building):
+    - Cache the DECODED, normalised float array (immutable, shared_ptr)
+      rather than only the codes_handle*: eccodes unpacks the data section
+      on every codes_get_double_array call (milliseconds for complex /
+      JPEG2000 packing), and one handle cannot be used by several query
+      threads at once. The handle (or its metadata) can be kept alongside
+      for key lookups. shared_ptr pinning also gives "no purge mid-query":
+      an entry in use is only freed when the last query releases it.
+    - Account entry bytes exactly (ni*nj*4 per decoded message) as the
+      primary purge trigger; keep /proc/self/statm RSS as the safety net
+      for the forced cleanup, followed by malloc_trim(0), because glibc
+      often keeps freed memory and RSS alone may not drop after a purge.
+    - Surface obs, aviation messages and future road sensors are treated
+      equally (one report model, distinguished by source class) - as the
+      obs store already does.
 Q11 [open] /v1/point details the sketch left open (T9, query.h). As
     implemented, please confirm or change:
     a) Field syntax `name[@level]` with @sfc, @msl, @<x>m (above ground),
@@ -176,3 +200,14 @@ Q11 [open] /v1/point details the sketch left open (T9, query.h). As
     g) (T10) ?snapshot=<seq> responses are Cache-Control: public,
        max-age=86400; live ones no-store. A pinned snapshot whose files
        expired answers 410, one no longer retained 404.
+Q12 [decided by Chris 2026-11-08, format open] Map tiles are PNG,
+    coloured on the back end with colormaps (the product manifest's
+    colormap type: ../product_manifest.json). Contract draft in
+    docs/api/query-api-v1.md (/v1/tiles/{model}/{field}/{run}/{fhr}/
+    {z}/{x}/{y}.png?colormap=, /v1/colormaps). To settle: the colormap
+    export format (config/colormaps.json from the web app, like
+    sources.json: name, units, stops value->colour, interpolation
+    linear|log|exponential|step, below/above colours), default colormap
+    per variable, tile resampling (bilinear from the grid per pixel),
+    and whether the run segment accepts "latest" (would make tiles
+    mutable, so probably not).

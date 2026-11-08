@@ -19,7 +19,7 @@ Symfony web app (`../web`) and the engine; keep both sides in step with it.
 
 ## Export rules (web app side)
 
-- Files are written to `/atmotensor/config/`, atomically: write a temp
+- Files are written to `/opt/atmotensor/data/config/`, atomically: write a temp
   file in the same directory, fsync, rename over the target. A reader must
   never see a partial file.
 - Every file is a JSON object with `"format"` and `"version"` keys first.
@@ -127,7 +127,7 @@ so an admin can confirm or merge it.
   high-water mark stored in each station generation. Within a range refs
   only grow and are never reused.
 - Ingest writes new provisional stations to
-  `/atmotensor/config/outbox/provisional-<gen:016x>.json`, one file per
+  `/opt/atmotensor/data/config/outbox/provisional-<gen:016x>.json`, one file per
   station generation that has any (format below). The web app imports it,
   keeping the ref, and deletes the file. The engine never deletes outbox
   files.
