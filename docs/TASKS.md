@@ -73,7 +73,7 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       SnapshotLoader::refresh(), and `?snapshot=<seq>` pinning of a
       retained snapshot. Can start independently of T2-T9
       using a stub handler. Provide an example nginx config under `deploy/`.
-- [ ] T11 Ingest: GRIB2 via eccodes -> GridStore + field files. Identity bytes
+- [x] T11 Ingest: GRIB2 via eccodes -> GridStore + field files. Identity bytes
       = GRIB2 section 3 octets; normalise scan modes; convert to SI. eccodes
       comes from the distro package (D9). CMake: auto-detect (CONFIG package,
       then pkg-config, then find_path/find_library), honour
@@ -82,6 +82,12 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       else (including all existing tests) must still build and pass. Test
       GRIB fixtures: generate tiny GRIB2 files with eccodes itself in a test
       helper rather than checking in large binaries.
+      Done: `grib.h` (GribReader, ingest_grib, add_to_manifest),
+      `tools/atmo_grib_ingest` (decode + publish, dev tool until the ingest
+      daemon). Ubuntu's eccodes CMake config is broken (references the
+      missing libeccodes_f90.so.0), so the config package is probed in a
+      sub-configure (cmake/eccodes_probe) and pkg-config is used there.
+      Message selection policy: Q9.
 - [ ] T11b Derived products (D12): write 06-derived-products.md with Chris
       first (derivation registry format, trigger when inputs complete,
       provenance, versioning, where feature outputs such as fronts live).

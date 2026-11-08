@@ -109,3 +109,23 @@ Q8 [open] Reference-data import policy (T5b). The spec did not pin these
        web app cannot see them. Should ingest write e.g.
        config/outbox/import-status.json so the admin UI can show "export
        rejected: ..."?
+Q9 [open] GRIB2 message selection (T11). A field file holds one field per
+    (param_id, level_type, level_value), but NCEP files can carry several
+    messages that map to the same key. Implemented meanwhile (skips are
+    reported with a reason, never silent):
+    a) Statistically processed fields (template 4.8): only intervals that
+       start at the run time are kept (HRRR f03 has APCP 0-3 h and 2-3 h;
+       the 2-3 h one is skipped). Should hourly/bucket accumulations be
+       kept too, e.g. as their own variable codes or with the interval
+       recorded in the field directory?
+    b) Only the first fixed surface defines the level; layers (second
+       surface: 0-6 km shear, 180-0 hPa above ground CAPE vs 255-0) that
+       collide on the first surface keep the first message. Add a second
+       level to FieldInfo?
+    c) WMO-standard parameters only (< 192 in table 4.2). NCEP-local ones
+       (composite reflectivity 0.16.196, HPBL 0.3.196, MSLMA 0.3.198) are
+       skipped until the registry gets centre-specific GRIB mappings.
+    d) Other templates (ensembles 4.1/4.11, probabilities 4.5/4.9) and
+       sub-hourly steps (HRRR subh files) are skipped.
+    e) Messages on a second grid in the same input are skipped (one grid
+       per field file); messages for another run/hour are an error.

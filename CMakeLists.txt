@@ -66,6 +66,85 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 atmo_target_defaults(atmo)
 
+# GRIB2 ingest (T11, D9): eccodes from the distro package, or a hand-built
+# copy via -DECCODES_ROOT=/prefix (or CMAKE_PREFIX_PATH).  Detection order:
+# CMake config package, pkg-config, plain find_path/find_library.  With
+# OFF, or AUTO and nothing found, everything else builds without it.
+set(ATMO_WITH_ECCODES AUTO CACHE STRING "GRIB2 ingest with eccodes: AUTO|ON|OFF")
+set_property(CACHE ATMO_WITH_ECCODES PROPERTY STRINGS AUTO ON OFF)
+set(ECCODES_ROOT "" CACHE PATH "Install prefix of a hand-built eccodes")
+set(ATMO_ECCODES_TARGET "")
+if(NOT ATMO_WITH_ECCODES STREQUAL "OFF")
+  if(ECCODES_ROOT)
+    list(PREPEND CMAKE_PREFIX_PATH "${ECCODES_ROOT}")
+    set(ENV{PKG_CONFIG_PATH}
+      "${ECCODES_ROOT}/lib/pkgconfig:${ECCODES_ROOT}/lib64/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+  endif()
+  # Config package first, but only if it loads cleanly in a sub-configure
+  # (see cmake/eccodes_probe): a broken one is a fatal error even QUIET.
+  if(NOT DEFINED ATMO_ECCODES_CONFIG_OK)
+    string(REPLACE ";" "\\;" atmo_prefix_path "${CMAKE_PREFIX_PATH}")
+    execute_process(
+      COMMAND ${CMAKE_COMMAND}
+        -S ${CMAKE_CURRENT_SOURCE_DIR}/cmake/eccodes_probe
+        -B ${CMAKE_CURRENT_BINARY_DIR}/eccodes_probe
+        "-DCMAKE_PREFIX_PATH=${atmo_prefix_path}"
+      RESULT_VARIABLE atmo_probe_rc OUTPUT_QUIET ERROR_QUIET)
+    if(atmo_probe_rc EQUAL 0)
+      set(ATMO_ECCODES_CONFIG_OK TRUE CACHE INTERNAL "")
+    else()
+      set(ATMO_ECCODES_CONFIG_OK FALSE CACHE INTERNAL "")
+      message(STATUS
+        "AtmoTensor: eccodes CMake config package missing or broken")
+    endif()
+  endif()
+  if(ATMO_ECCODES_CONFIG_OK)
+    find_package(eccodes CONFIG QUIET)
+  endif()
+  if(eccodes_FOUND AND TARGET eccodes)
+    set(ATMO_ECCODES_TARGET eccodes)
+    set(atmo_eccodes_how "CMake config (${eccodes_DIR})")
+  else()
+    find_package(PkgConfig QUIET)
+    if(PKG_CONFIG_FOUND)
+      pkg_check_modules(ATMO_ECCODES_PC QUIET IMPORTED_TARGET eccodes)
+    endif()
+    if(ATMO_ECCODES_PC_FOUND)
+      set(ATMO_ECCODES_TARGET PkgConfig::ATMO_ECCODES_PC)
+      set(atmo_eccodes_how "pkg-config")
+    else()
+      find_path(ECCODES_INCLUDE_DIR eccodes.h
+        HINTS ${ECCODES_ROOT} PATH_SUFFIXES include)
+      find_library(ECCODES_LIBRARY eccodes
+        HINTS ${ECCODES_ROOT} PATH_SUFFIXES lib lib64)
+      if(ECCODES_INCLUDE_DIR AND ECCODES_LIBRARY)
+        add_library(atmo_eccodes INTERFACE IMPORTED)
+        target_include_directories(atmo_eccodes INTERFACE ${ECCODES_INCLUDE_DIR})
+        target_link_libraries(atmo_eccodes INTERFACE ${ECCODES_LIBRARY})
+        set(ATMO_ECCODES_TARGET atmo_eccodes)
+        set(atmo_eccodes_how "find_library (${ECCODES_LIBRARY})")
+      endif()
+    endif()
+  endif()
+  if(ATMO_ECCODES_TARGET)
+    message(STATUS "AtmoTensor: eccodes found via ${atmo_eccodes_how}")
+  elseif(ATMO_WITH_ECCODES STREQUAL "ON")
+    message(FATAL_ERROR
+      "ATMO_WITH_ECCODES=ON but eccodes was not found (set ECCODES_ROOT)")
+  else()
+    message(STATUS "AtmoTensor: eccodes not found, GRIB2 ingest disabled")
+  endif()
+endif()
+if(ATMO_ECCODES_TARGET)
+  target_sources(atmo PRIVATE src/grib.cpp)
+  target_link_libraries(atmo PUBLIC ${ATMO_ECCODES_TARGET})
+  target_compile_definitions(atmo PUBLIC ATMO_HAVE_ECCODES=1)
+  # Development tool until the ingest daemon exists.
+  add_executable(atmo_grib_ingest tools/atmo_grib_ingest.cpp)
+  target_link_libraries(atmo_grib_ingest PRIVATE atmo::atmo)
+  atmo_target_defaults(atmo_grib_ingest)
+endif()
+
 # Shared test/bench scaffolding: harness and synthetic Lambert grid.
 if(ATMO_BUILD_TESTS OR ATMO_BUILD_BENCH)
   add_library(atmo_testkit STATIC tests/check.cpp tests/lambert.cpp)
@@ -82,6 +161,12 @@ if(ATMO_BUILD_TESTS)
     atmo_target_defaults(test_${t})
     add_test(NAME ${t} COMMAND test_${t})
   endforeach()
+  if(ATMO_ECCODES_TARGET)
+    add_executable(test_grib tests/test_grib.cpp)
+    target_link_libraries(test_grib PRIVATE atmo_testkit)
+    atmo_target_defaults(test_grib)
+    add_test(NAME grib COMMAND test_grib)
+  endif()
 endif()
 
 # Variable registry (Q4): docs/design/variables.csv -> include/atmo/variables.h

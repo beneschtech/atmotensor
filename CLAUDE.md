@@ -27,6 +27,8 @@ CMake only (CLion); presets in CMakePresets.json: default, asan, ci.
     cmake --preset asan && cmake --build --preset asan -j && ctest --preset asan
     ./build-cmake/bench_kdtree; ./build-cmake/bench_grid
     # options: ATMO_SANITIZE ATMO_WERROR ATMO_BUILD_TESTS ATMO_BUILD_BENCH
+    #          ATMO_WITH_ECCODES=AUTO|ON|OFF, ECCODES_ROOT=/prefix
+    ./build-cmake/atmo_grib_ingest --root DIR --model gfs [--seed-sources] F.grib2
 
 No Catch2/gtest: tests use the tiny harness in `tests/check.h` (TEST, CHECK,
 CHECK_NEAR; non-fatal). Keep new tests dependency-free. `-ffp-contract=off` is
@@ -60,6 +62,13 @@ and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
 - `include/atmo/variable.h` VariableInfo + lookups (code, name, GRIB2);
   `include/atmo/variables.h` is GENERATED from docs/design/variables.csv
   (edit the CSV, build target `gen_variables`; codes are never reused)
+- `include/atmo/grib.h` (only with eccodes, ATMO_HAVE_ECCODES) GribReader:
+  section 3 identity, scan-mode normalisation, registry params + SI,
+  levels (table 4.5), grid-relative u/v flag; ingest_grib() -> GridStore +
+  one field file per (model, run, fhr). Ubuntu's eccodes CMake config is
+  broken (missing libeccodes_f90), so it is probed in a sub-configure
+  (cmake/eccodes_probe) before use; pkg-config is the usual route.
+- `tools/atmo_grib_ingest.cpp` dev CLI: ingest + publish
 - `include/atmo/crc32.h`    CRC-32 (zlib-compatible)
 - `include/atmo/source.h`   SourceClass (metric per source class),
   SourceRegistry (JSON config)
