@@ -52,6 +52,30 @@ query process still has mapped is safe on Linux (the mapping stays valid until
 unmapped). A `gc` pass removes files in `tmp/` and any data file not named by
 a retained manifest and older than the grace period.
 
+Implementation (T6). The grace period runs from retirement, not from the
+file's mtime (a 72 h old segment expired now still gets its 10 minutes), so
+retirement is recorded in the manifest itself:
+
+- The manifest has a `retired` list of `{path, retired_at}`.
+  `ManifestPublisher::publish()` maintains it: every file the current
+  manifest lists and the next one does not is added with `retired_at` =
+  now; a retired file that is listed again is live again. Callers never
+  edit it. This also retires replaced station generations.
+- `collect_garbage(grace)`: (1) retired entries older than the grace period
+  are dropped from the manifest (one publish), then unlinked; (2) any
+  regular file under `grids/`, `stations/`, `fields/`, `obs/` or `tmp/`
+  that the current manifest neither lists nor retires and whose mtime is
+  older than the grace period is unlinked (crash leftovers, temp files);
+  (3) emptied data directories are removed. `manifest/`, `config/` and
+  `journal/` are never touched.
+- Retention itself is `apply_retention()` (retention.h), a pure function of
+  (manifest, now, policy): obs buckets expire when bucket_start +
+  bucket_seconds (the segment's own, recorded in its entry) < now -
+  retain_seconds; fields keep the newest K runs per model; grids no
+  remaining field uses expire.
+- A `?snapshot=<seq>` pin works only while the files still exist, i.e.
+  within the grace period of anything that snapshot needs.
+
 ## Ingest daemon
 
 One daemon is the sole publisher (flock enforces it). Internally threaded:

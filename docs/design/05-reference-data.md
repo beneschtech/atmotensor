@@ -105,7 +105,15 @@ k-d tree metric. Editing them is allowed:
   reused or removed; periods are sorted and do not overlap; one identifier
   is never bound to two stations at the same time; a fixed station
   (neither flag) needs at least one period.
-- Ingest turns the export into the next `stations-<gen>.tbl` generation.
+- Ingest turns the export into the next `stations-<gen>.tbl` generation
+  (`RefDataImporter`, T5b), starting from the previous generation:
+  stations in the export replace theirs; a web-app ref missing from the
+  export rejects the export (refs are never removed); a provisional ref
+  missing from it is kept (the web app has not imported it yet); the
+  export may only contain provisional refs that ingest assigned. An export
+  equal to the current generation (identifier order ignored) publishes
+  nothing. An invalid export is rejected as a whole and the previous
+  version stays published (Q8).
 
 ## Write-back: provisional stations (Q7)
 
@@ -118,10 +126,33 @@ so an admin can confirm or merge it.
   below 2^31), ingest assigns [2^31, 2^32) counting up from the provisional
   high-water mark stored in each station generation. Within a range refs
   only grow and are never reused.
-- Ingest writes each new provisional station to
-  `/atmotensor/config/outbox/provisional-<seq>.json` (format: T5b). The web
-  app imports it, keeping the ref.
+- Ingest writes new provisional stations to
+  `/atmotensor/config/outbox/provisional-<gen:016x>.json`, one file per
+  station generation that has any (format below). The web app imports it,
+  keeping the ref, and deletes the file. The engine never deletes outbox
+  files.
 - In the admin, a provisional station is either confirmed (the flag is
   cleared, the ref stays) or merged into an existing station (it stays as
   an alias with `merged_into` set, so reports that point at it still
   resolve). It is never deleted.
+
+### Outbox file format (T5b)
+
+    {
+      "format": "atmo-provisional-stations", "version": 1,
+      "generation": 12,
+      "stations": [
+        { "ref": 2147483648, "name": "unknown WDC1234",
+          "flags": ["provisional", "mobile"], "merged_into": null,
+          "ids": [ { "type": "platform", "value": "WDC1234",
+                     "valid_from": null, "valid_to": null } ],
+          "periods": [] }
+      ]
+    }
+
+- Station objects are exactly those of `config/stations.json`.
+- A file lists every provisional station of that generation that the last
+  valid `stations.json` does not contain yet, so a station can appear in
+  several files (also after an ingest restart, which re-announces pending
+  stations if the current generation's file is missing). **The import must
+  be idempotent by ref**: skip refs that already exist.

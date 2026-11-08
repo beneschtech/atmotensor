@@ -36,13 +36,21 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       readers), `snapshot.h` (Snapshot, SnapshotLoader). Deferred to T10:
       inotify watch of CURRENT, `?snapshot=<seq>` pinning. Field entries
       are carried but not opened until T7.
-- [ ] T5b Reference-data import (05-reference-data.md): watch config/,
+- [x] T5b Reference-data import (05-reference-data.md): watch config/,
       validate sources.json and stations.json, keep the previous version on
       error, publish through the manifest (source classes copied into it;
       stations as the next generation). Provisional-station write-back after
       Q7 is decided.
-- [ ] T6  Retention + gc (expire buckets/runs, grace-period unlink,
+      Done: `refdata.h` (StationsExport JSON, RefDataImporter::poll() with
+      change detection by inode/size/mtime, add_provisional() + outbox).
+      Policy points in Q8. Deferred to the ingest daemon: inotify on
+      config/ (poll() is what it calls).
+- [x] T6  Retention + gc (expire buckets/runs, grace-period unlink,
       `gc()` of unreferenced files). Tests with fake clocks.
+      Done: `retention.h` (apply_retention, RetentionPolicy), manifest
+      `retired` list maintained by publish(), segment entries carry
+      `bucket_seconds`, `ManifestPublisher::collect_garbage()` and
+      `set_clock()`. See 02-manifest-and-processes.md "Retirement".
 - [ ] T7  Field file write/read (03-field-tiles.md) + `sample()` bilinear
       including periodic halo. Acceptance tests 1-4.
 - [ ] T8  Raw journal + replay (02-...md acceptance test 5), group commit.
