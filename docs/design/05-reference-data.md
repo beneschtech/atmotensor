@@ -67,7 +67,8 @@ k-d tree metric. Editing them is allowed:
   snapshot's source class gets its tree rebuilt in RAM from the segment's
   stored columns (lat, lon, height, obs time) with the current metric. Every
   tree a query searches then uses one metric, so results merged across
-  buckets stay comparable.
+  buckets stay comparable. A change of `bucket_seconds` alone does not
+  change distances, so those segments keep their prebuilt trees.
 - Old segments age out within the retention window, so the rebuild cost
   disappears on its own.
 - Changing `bucket_seconds` additionally means old and new buckets have

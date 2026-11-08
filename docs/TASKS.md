@@ -25,8 +25,8 @@ Status legend: [ ] todo, [~] in progress, [x] done.
 - [x] T3  Station table (append-only generations, validity intervals, stable
       refs). Tests: round trip, ref stability across generations, lookup by
       id and by (id, time).
-- [ ] T4  `ObsIndex`: visible-version knn/radius/corridor across segments and
-      buckets (01-obs-store.md). Acceptance tests 3, 4; plus a randomized test
+- [x] T4  `ObsIndex`: visible-version knn/radius across segments and
+      buckets (01-obs-store.md); visibility from a per-bucket version map. Acceptance tests 3, 4; plus a randomized test
       against a brute-force oracle that implements "latest version wins".
       Segments whose stored metric differs from the current source class get
       their tree rebuilt in RAM (Q5b, 05-reference-data.md); test it.
@@ -60,7 +60,14 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       else (including all existing tests) must still build and pass. Test
       GRIB fixtures: generate tiny GRIB2 files with eccodes itself in a test
       helper rather than checking in large binaries.
-- [ ] T12 Route sampling + corridor obs.
+- [ ] T11b Derived products (D12): write 06-derived-products.md with Chris
+      first (derivation registry format, trigger when inputs complete,
+      provenance, versioning, where feature outputs such as fronts live).
+      Then the framework plus wind speed/direction from u/v (grid-relative
+      winds rotated to earth first), with tests against hand-computed
+      values. EDR and front detection are later tasks of their own.
+- [ ] T12 Route sampling + corridor obs (moved here from T4): design the
+      corridor query with selectable strategies for using the route points.
 - [ ] T13 OpenCL ABI: flat-buffer views of Grid / FieldFile tile tables / obs
       CSR bucket grids, and `grid_sample()` / `obs_neighbors()` device
       functions. Design review with Chris first.

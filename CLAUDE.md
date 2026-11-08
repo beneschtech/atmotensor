@@ -60,6 +60,9 @@ and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
 - `include/atmo/obs_segment.h` ObsSegmentWriter / ObsSegment: immutable
   `*.seg` files (reports | values | raw | prebuilt tree), mmap'd, opened
   from the file without a rebuild
+- `include/atmo/obs_index.h` ObsIndex: visible-version knn/radius over all
+  segments of a snapshot (per-bucket version maps, time window, in-RAM
+  tree rebuild on metric change)
 - `include/atmo/stations.h` StationTableBuilder / StationTable: immutable
   station generations (typed ids with validity, position periods, stable
   refs); authoritative copy will live in MySQL (D10)

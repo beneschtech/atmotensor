@@ -77,13 +77,23 @@ report_key, the row with max receipt_seq <= as_of.
 - Search all segments of the buckets overlapping [t - W, t + W]
   (W = 3 * tau default), each with its own tree.
 - Merge candidate lists by (d2, report_key, receipt_seq); drop superseded rows.
+  Visibility is decided by a per-bucket version map (report_key -> versions
+  as (receipt_seq, segment, row)), built when a snapshot is adopted, never
+  from the candidate list alone: a correction may move a report, so its
+  newer version can lie outside the candidates. Corrections share obs_time,
+  so the map never spans buckets.
+- The window is a hard filter (|obs_time - t| <= W), so results do not depend
+  on where bucket boundaries fall.
 - Because dropped rows can leave fewer than k, run knn with k' = 2k and double
-  k' until k visible results or the tree is exhausted.
+  k' until k visible results or the tree is exhausted. Precisely: let B be
+  the smallest last-returned d2 over trees that still have rows left; stop
+  once k visible candidates have d2 < B (all rows below B have been seen).
 - Results are ordered by (d2, report_key) - deterministic.
 
 API sketch (library): `ObsIndex::knn(source, point, k, as_of)`,
-`radius(...)`, `corridor(source, polyline_with_times, half_width_km, as_of)`;
-return `ReportView` (position, times, values span, raw span, flags).
+`radius(...)`; return `ReportView` (position, times, values span, raw span,
+flags). `corridor(...)` is designed in T12 together with route sampling, so
+it can offer several strategies for using the route points.
 
 ## Station table
 
