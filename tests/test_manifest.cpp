@@ -206,10 +206,11 @@ TEST(manifest_json_round_trip_and_validation)
       "hrrr", 1762333200, 3, 0xabcdef0123456789ULL,
       "fields/hrrr/2025110509/f003.fld", 5});
   m.segments.push_back(
-    SegmentEntry{"metar", kBucket, "obs/metar/1762333200/a.seg", 1, 9, 4, 6});
+    SegmentEntry{
+      "metar", kBucket, 3600, "obs/metar/1762333200/a.seg", 1, 9, 4, 6});
   m.segments.push_back(
     SegmentEntry{
-      "metar", kBucket, "obs/metar/1762333200/empty.seg", 0, 0, 0, 7});
+      "metar", kBucket, 3600, "obs/metar/1762333200/empty.seg", 0, 0, 0, 7});
   m.validate();
   CHECK(Manifest::from_text(m.to_text()) == m);
   CHECK(Manifest::file_name(0x1a) == "MANIFEST-000000000000001a.json");
@@ -220,7 +221,7 @@ TEST(manifest_json_round_trip_and_validation)
     x.next_receipt_seq = 10;
     x.grids.push_back(GridEntry{1, "grids/0000000000000001.grid", 0});
     x.segments.push_back(
-      SegmentEntry{"metar", kBucket, "obs/metar/1/a.seg", 1, 2, 2, 0});
+      SegmentEntry{"metar", kBucket, 3600, "obs/metar/1/a.seg", 1, 2, 2, 0});
     x.validate();
     mutate(x);
     return throws<std::invalid_argument>([&] { x.validate(); });
@@ -312,7 +313,8 @@ TEST(publisher_publish_read_prune)
     // Rejected publishes leave the state alone.
     Manifest bad = pub.current();
     bad.segments.push_back(
-      SegmentEntry{"metar", kBucket, "obs/metar/1/missing.seg", 0, 0, 0, 0});
+      SegmentEntry{
+        "metar", kBucket, 3600, "obs/metar/1/missing.seg", 0, 0, 0, 0});
     CHECK(throws<std::invalid_argument>([&] { pub.publish(bad); }));
     bad = pub.current();
     bad.next_receipt_seq -= 1;

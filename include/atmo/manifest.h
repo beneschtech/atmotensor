@@ -77,6 +77,9 @@ struct SegmentEntry
 {
   std::string source;  // a source class of the manifest
   std::int64_t bucket_start_s = 0;
+  // Length of the bucket the segment was written for (may differ from the
+  // source class after a bucket_seconds change); > 0.
+  std::int64_t bucket_seconds = 0;
   std::string path;  // obs/<source>/<bucket_start>/<seg-id>.seg
   std::uint64_t receipt_seq_min = 0;  // 0/0 for an empty segment
   std::uint64_t receipt_seq_max = 0;
@@ -90,6 +93,16 @@ struct SegmentEntry
   static SegmentEntry from_segment(
     const std::filesystem::path& root,
     const ObsSegment& seg);
+};
+
+// A file that a manifest stopped naming, kept until the grace period has
+// passed (02-manifest-and-processes.md, "Retirement").
+struct RetiredEntry
+{
+  std::string path;  // relative, under grids/ stations/ fields/ or obs/
+  std::int64_t retired_at_s = 0;
+
+  bool operator==(const RetiredEntry&) const = default;
 };
 
 struct Manifest
@@ -107,17 +120,24 @@ struct Manifest
   std::vector<GridEntry> grids;
   std::vector<FieldEntry> fields;
   std::vector<SegmentEntry> segments;
+  // Managed by ManifestPublisher (publish() and collect_garbage()); never
+  // names a file the manifest also lists.
+  std::vector<RetiredEntry> retired;
 
   bool operator==(const Manifest&) const = default;
 
   // "MANIFEST-<seq as 16 hex digits>.json"
   static std::string file_name(std::uint64_t seq);
 
-  // At least one source class; paths relative, under their kind's directory, no
-  // "." or ".." components, unique; grid keys and (model, run, fhr) unique;
-  // field grids present; segment sources known; receipt seqs below
+  // At least one source class; paths relative, under their kind's
+  // directory, no "." or ".." components, unique (live and retired
+  // together); grid keys and (model, run, fhr) unique; field grids present;
+  // segment sources known, bucket_seconds > 0; receipt seqs below
   // next_receipt_seq.  std::invalid_argument otherwise.
   void validate() const;
+
+  // Every file the manifest lists (not the retired ones).
+  std::vector<std::string> live_paths() const;
 
   nlohmann::json to_json() const;
   std::string to_text() const;
@@ -133,6 +153,14 @@ enum class PublishStep
   manifest_written,  // MANIFEST-<seq> durable, CURRENT untouched
   current_written,   // CURRENT.tmp durable, not yet renamed
   current_renamed,   // CURRENT replaced, directory not yet fsynced
+};
+
+struct GcReport
+{
+  std::size_t retired_unlinked = 0;  // grace period over
+  std::size_t orphans_unlinked = 0;  // named by nothing, older than grace
+  std::size_t dirs_removed = 0;      // emptied data directories
+  std::optional<std::uint64_t> published_seq;
 };
 
 // The sole publisher.  Construction takes manifest/LOCK (flock, never
@@ -156,7 +184,12 @@ class ManifestPublisher
   // The last published manifest (seq 0 and empty if none yet).
   const Manifest& current() const { return current_; }
 
+  static constexpr std::int64_t kDefaultGraceSeconds = 600;
+
   // Publishes `next` as seq current().seq + 1 with created_at = now.
+  // `next.retired` is ignored: the publisher carries current().retired
+  // forward and adds every file current() lists but `next` does not
+  // (retired_at = now); a retired file listed again is live again.
   // Besides validate(): every named file must exist, next_receipt_seq and
   // the station generation must not go backwards.  std::invalid_argument
   // for those, std::runtime_error on I/O failure.  On any exception the
@@ -165,10 +198,28 @@ class ManifestPublisher
   // Afterwards manifests older than the newest `keep` are deleted.
   const Manifest& publish(Manifest next);
 
+  // Retirement and gc (02-manifest-and-processes.md):
+  //  1. retired files whose grace period is over are dropped from the
+  //     retired list (one publish), then unlinked;
+  //  2. any regular file under grids/, stations/, fields/, obs/ or tmp/
+  //     that the current manifest neither lists nor retires and whose mtime
+  //     is at least `grace_s` old is unlinked (crash leftovers, temp files,
+  //     files whose retired entry was already dropped);
+  //  3. data directories left empty are removed (not the top-level ones).
+  // manifest/, config/ and journal/ are never touched.  Missing files are
+  // not errors.  std::runtime_error on I/O failure.
+  GcReport collect_garbage(std::int64_t grace_s = kDefaultGraceSeconds);
+
+  // Unix seconds used for created_at, retired_at and gc; tests set a fake
+  // clock.  Default: the system clock.
+  void set_clock(std::function<std::int64_t()> clock);
+  std::int64_t now() const;
+
   // Called after each step; used by tests to simulate a crash by throwing.
   void set_fault_hook(std::function<void(PublishStep)> hook);
 
  private:
+  const Manifest& publish_impl(Manifest next, std::vector<RetiredEntry> keep);
   void recover();
   void prune() const;
   void fault(PublishStep s) const;
@@ -179,6 +230,7 @@ class ManifestPublisher
   int lock_fd_ = -1;
   Manifest current_;
   std::function<void(PublishStep)> hook_;
+  std::function<std::int64_t()> clock_;
 };
 
 // Seq named by manifest/CURRENT; nullopt if there is no CURRENT yet.

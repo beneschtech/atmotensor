@@ -70,6 +70,9 @@ and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
   kind), ManifestPublisher (flock on manifest/LOCK, MANIFEST -> CURRENT.tmp
   -> rename protocol, keeps last M, cleans up crashed publishes),
   read_current_manifest()
+- `include/atmo/retention.h` apply_retention(): obs buckets by
+  retain_seconds, newest K runs per model, unused grids; the publisher's
+  `retired` list + collect_garbage() unlink after the grace period
 - `include/atmo/snapshot.h` Snapshot (every file of one manifest opened up
   front and checked against its entry, ObsIndex), SnapshotLoader
   (refresh()/current() over an atomic shared_ptr, reuses unchanged mappings)

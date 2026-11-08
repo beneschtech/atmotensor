@@ -2,8 +2,10 @@
 
 #include <fcntl.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cinttypes>
@@ -201,6 +203,7 @@ SegmentEntry SegmentEntry::from_segment(
   SegmentEntry e;
   e.source = std::string(seg.source_name());
   e.bucket_start_s = seg.bucket_start_s();
+  e.bucket_seconds = seg.bucket_seconds();
   e.path = rel.generic_string();
   e.receipt_seq_min = seg.receipt_seq_min();
   e.receipt_seq_max = seg.receipt_seq_max();
@@ -293,6 +296,10 @@ void Manifest::validate() const
       bad("segment " + s.path + ": unknown source \"" + s.source + "\"");
     }
     check_path(s.path, "obs/" + s.source);
+    if (s.bucket_seconds <= 0)
+    {
+      bad("segment " + s.path + ": bucket_seconds must be > 0");
+    }
     if (s.report_count == 0)
     {
       if (s.receipt_seq_min != 0 || s.receipt_seq_max != 0)
@@ -310,6 +317,44 @@ void Manifest::validate() const
     }
     add_path(s.path);
   }
+
+  for (const auto& r : retired)
+  {
+    bool under_kind = false;
+    for (const char* kind : {"grids", "stations", "fields", "obs"})
+    {
+      const std::string pre = std::string(kind) + "/";
+      under_kind = under_kind || r.path.compare(0, pre.size(), pre) == 0;
+    }
+    if (!under_kind)
+    {
+      bad("retired path \"" + r.path + "\" is not a data file");
+    }
+    check_path(r.path, r.path.substr(0, r.path.find('/')));
+    add_path(r.path);
+  }
+}
+
+std::vector<std::string> Manifest::live_paths() const
+{
+  std::vector<std::string> v;
+  if (stations)
+  {
+    v.push_back(stations->path);
+  }
+  for (const auto& g : grids)
+  {
+    v.push_back(g.path);
+  }
+  for (const auto& f : fields)
+  {
+    v.push_back(f.path);
+  }
+  for (const auto& e : segments)
+  {
+    v.push_back(e.path);
+  }
+  return v;
 }
 
 json Manifest::to_json() const
@@ -359,6 +404,7 @@ json Manifest::to_json() const
     s.push_back(
       {{"source", e.source},
        {"bucket_start", e.bucket_start_s},
+       {"bucket_seconds", e.bucket_seconds},
        {"path", e.path},
        {"receipt_seq_min", e.receipt_seq_min},
        {"receipt_seq_max", e.receipt_seq_max},
@@ -366,6 +412,12 @@ json Manifest::to_json() const
        {"header_crc", e.header_crc}});
   }
   j["segments"] = std::move(s);
+  json r = json::array();
+  for (const auto& e : retired)
+  {
+    r.push_back({{"path", e.path}, {"retired_at", e.retired_at_s}});
+  }
+  j["retired"] = std::move(r);
   return j;
 }
 
@@ -379,7 +431,7 @@ Manifest Manifest::from_json(const json& j)
   check_keys(
     j, "manifest",
     {"format", "version", "seq", "created_at", "next_receipt_seq", "sources",
-     "stations", "grids", "fields", "segments"});
+     "stations", "grids", "fields", "segments", "retired"});
   if (!j.at("format").is_string() || j.at("format") != kFormat)
   {
     bad(std::string("\"format\" must be \"") + kFormat + "\"");
@@ -431,17 +483,26 @@ Manifest Manifest::from_json(const json& j)
   {
     check_keys(
       s, "manifest: segment",
-      {"source", "bucket_start", "path", "receipt_seq_min", "receipt_seq_max",
-       "report_count", "header_crc"});
+      {"source", "bucket_start", "bucket_seconds", "path", "receipt_seq_min",
+       "receipt_seq_max", "report_count", "header_crc"});
     SegmentEntry e;
     e.source = get_str(s, "source", "manifest: segment");
     e.bucket_start_s = get_i64(s, "bucket_start", "manifest: segment");
+    e.bucket_seconds = get_i64(s, "bucket_seconds", "manifest: segment");
     e.path = get_str(s, "path", "manifest: segment");
     e.receipt_seq_min = get_u64(s, "receipt_seq_min", "manifest: segment");
     e.receipt_seq_max = get_u64(s, "receipt_seq_max", "manifest: segment");
     e.report_count = get_u64(s, "report_count", "manifest: segment");
     e.header_crc = get_u32(s, "header_crc", "manifest: segment");
     m.segments.push_back(std::move(e));
+  }
+  for (const auto& r : detail::get_array(j, "retired", "manifest"))
+  {
+    check_keys(r, "manifest: retired", {"path", "retired_at"});
+    m.retired.push_back(
+      RetiredEntry{
+        get_str(r, "path", "manifest: retired"),
+        get_i64(r, "retired_at", "manifest: retired")});
   }
   m.validate();
   return m;
@@ -619,10 +680,50 @@ void ManifestPublisher::fault(PublishStep s) const
   }
 }
 
+void ManifestPublisher::set_clock(std::function<std::int64_t()> clock)
+{
+  clock_ = std::move(clock);
+}
+
+std::int64_t ManifestPublisher::now() const
+{
+  return clock_ ? clock_() : now_s();
+}
+
 const Manifest& ManifestPublisher::publish(Manifest next)
 {
+  const std::int64_t t = now();
+  std::set<std::string> live;
+  for (auto& p : next.live_paths())
+  {
+    live.insert(std::move(p));
+  }
+  std::vector<RetiredEntry> retired;
+  std::set<std::string> seen;
+  for (const auto& r : current_.retired)
+  {
+    if (!live.count(r.path) && seen.insert(r.path).second)
+    {
+      retired.push_back(r);
+    }
+  }
+  for (auto& p : current_.live_paths())
+  {
+    if (!live.count(p) && seen.insert(p).second)
+    {
+      retired.push_back(RetiredEntry{std::move(p), t});
+    }
+  }
+  return publish_impl(std::move(next), std::move(retired));
+}
+
+const Manifest& ManifestPublisher::publish_impl(
+  Manifest next,
+  std::vector<RetiredEntry> retired)
+{
   next.seq = current_.seq + 1;
-  next.created_at_s = now_s();
+  next.created_at_s = now();
+  next.retired = std::move(retired);
   next.validate();
   if (next.next_receipt_seq < current_.next_receipt_seq)
   {
@@ -703,6 +804,99 @@ const Manifest& ManifestPublisher::publish(Manifest next)
 
   prune();
   return current_;
+}
+
+GcReport ManifestPublisher::collect_garbage(std::int64_t grace_s)
+{
+  GcReport rep;
+  const std::int64_t t = now();
+  auto unlink = [](const fs::path& p) -> bool
+  {
+    if (::unlink(p.c_str()) == 0)
+    {
+      return true;
+    }
+    if (errno == ENOENT)
+    {
+      return false;
+    }
+    corrupt(p, std::string("unlink failed: ") + std::strerror(errno));
+  };
+
+  // 1. Retired files whose grace period is over: drop them from the
+  //    manifest first, so no published state lists a file that is gone.
+  std::vector<RetiredEntry> keep, due;
+  for (const auto& r : current_.retired)
+  {
+    (t - r.retired_at_s >= grace_s ? due : keep).push_back(r);
+  }
+  if (!due.empty())
+  {
+    rep.published_seq = publish_impl(current_, std::move(keep)).seq;
+    for (const auto& d : due)
+    {
+      rep.retired_unlinked += unlink(root_ / d.path) ? 1 : 0;
+    }
+  }
+
+  // 2. Orphans: named by nothing, old enough that no publish in progress
+  //    can be about to name them.
+  std::set<std::string> named;
+  for (auto& p : current_.live_paths())
+  {
+    named.insert(std::move(p));
+  }
+  for (const auto& r : current_.retired)
+  {
+    named.insert(r.path);
+  }
+  for (const char* kind : {"grids", "stations", "fields", "obs", "tmp"})
+  {
+    const fs::path top = root_ / kind;
+    std::error_code ec;
+    if (!fs::is_directory(fs::symlink_status(top, ec)))
+    {
+      continue;
+    }
+    std::vector<fs::path> dirs;
+    for (auto it = fs::recursive_directory_iterator(top);
+         it != fs::recursive_directory_iterator(); ++it)
+    {
+      const fs::file_status st = it->symlink_status();
+      if (fs::is_directory(st))
+      {
+        dirs.push_back(it->path());
+        continue;
+      }
+      const std::string rel =
+        it->path().lexically_relative(root_).generic_string();
+      if (named.count(rel))
+      {
+        continue;
+      }
+      struct stat sb;
+      if (::lstat(it->path().c_str(), &sb) != 0)
+      {
+        continue;  // vanished meanwhile
+      }
+      if (static_cast<std::int64_t>(sb.st_mtim.tv_sec) <= t - grace_s)
+      {
+        rep.orphans_unlinked += unlink(it->path()) ? 1 : 0;
+      }
+    }
+    // 3. Empty directories, deepest first; the top-level one stays.
+    std::sort(
+      dirs.begin(), dirs.end(), [](const fs::path& a, const fs::path& b)
+      { return a.native().size() > b.native().size(); });
+    for (const auto& d : dirs)
+    {
+      if (fs::is_empty(d, ec) && !ec && ::rmdir(d.c_str()) == 0)
+      {
+        ++rep.dirs_removed;
+      }
+    }
+  }
+  return rep;
 }
 
 void ManifestPublisher::prune() const

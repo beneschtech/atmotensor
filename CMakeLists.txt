@@ -47,6 +47,7 @@ add_library(atmo STATIC
   src/obs_index.cpp
   src/obs_segment.cpp
   src/refdata.cpp
+  src/retention.cpp
   src/snapshot.cpp
   src/source.cpp
   src/stations.cpp)
@@ -73,7 +74,7 @@ endif()
 
 if(ATMO_BUILD_TESTS)
   enable_testing()
-  foreach(t kdtree grid source obs obs_index stations manifest refdata)
+  foreach(t kdtree grid source obs obs_index stations manifest refdata retention)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} PRIVATE atmo_testkit)
     atmo_target_defaults(test_${t})
