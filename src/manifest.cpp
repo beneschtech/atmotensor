@@ -1,0 +1,818 @@
+#include "atmo/manifest.h"
+
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <chrono>
+#include <cinttypes>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <initializer_list>
+#include <limits>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <tuple>
+
+#include "atmo/crc32.h"
+#include "atmo/obs_segment.h"
+#include "atmo/stations.h"
+#include "fileio.h"
+
+namespace atmo
+{
+namespace
+{
+
+namespace fs = std::filesystem;
+using nlohmann::json;
+
+constexpr const char* kWho = "manifest";
+constexpr const char* kCurrent = "CURRENT";
+constexpr const char* kCurrentTmp = "CURRENT.tmp";
+constexpr const char* kLock = "LOCK";
+constexpr const char* kCurrentMagic = "atmo-current";
+constexpr int kCurrentVersion = 1;
+
+[[noreturn]] void bad(const std::string& what)
+{
+  throw std::invalid_argument(std::string("manifest: ") + what);
+}
+
+[[noreturn]] void corrupt(const fs::path& p, const std::string& what)
+{
+  throw std::runtime_error(
+    std::string("manifest: ") + p.string() + ": " + what);
+}
+
+// ---- JSON field access (strict) -------------------------------------------
+
+void check_keys(
+  const json& j,
+  const char* what,
+  std::initializer_list<const char*> allowed)
+{
+  if (!j.is_object())
+  {
+    bad(std::string(what) + ": not a JSON object");
+  }
+  for (const auto& [k, v] : j.items())
+  {
+    bool ok = false;
+    for (const char* a : allowed)
+    {
+      ok = ok || k == a;
+    }
+    if (!ok)
+    {
+      bad(std::string(what) + ": unknown key \"" + k + "\"");
+    }
+  }
+  for (const char* a : allowed)
+  {
+    if (!j.contains(a))
+    {
+      bad(std::string(what) + ": missing \"" + a + "\"");
+    }
+  }
+}
+
+std::uint64_t get_u64(const json& j, const char* key, const char* what)
+{
+  const json& v = j.at(key);
+  if (!v.is_number_unsigned())
+  {
+    bad(std::string(what) + ": \"" + key + "\" must be an unsigned integer");
+  }
+  return v.get<std::uint64_t>();
+}
+
+std::uint32_t get_u32(const json& j, const char* key, const char* what)
+{
+  const std::uint64_t v = get_u64(j, key, what);
+  if (v > std::numeric_limits<std::uint32_t>::max())
+  {
+    bad(std::string(what) + ": \"" + key + "\" out of range");
+  }
+  return static_cast<std::uint32_t>(v);
+}
+
+std::int64_t get_i64(const json& j, const char* key, const char* what)
+{
+  const json& v = j.at(key);
+  if (v.is_number_unsigned())
+  {
+    if (
+      v.get<std::uint64_t>() >
+      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+    {
+      bad(std::string(what) + ": \"" + key + "\" out of range");
+    }
+    return static_cast<std::int64_t>(v.get<std::uint64_t>());
+  }
+  if (!v.is_number_integer())
+  {
+    bad(std::string(what) + ": \"" + key + "\" must be an integer");
+  }
+  return v.get<std::int64_t>();
+}
+
+std::string get_str(const json& j, const char* key, const char* what)
+{
+  const json& v = j.at(key);
+  if (!v.is_string())
+  {
+    bad(std::string(what) + ": \"" + key + "\" must be a string");
+  }
+  return v.get<std::string>();
+}
+
+GridKey get_key(const json& j, const char* key, const char* what)
+{
+  const std::string s = get_str(j, key, what);
+  bool ok = s.size() == 16;
+  for (char c : s)
+  {
+    ok = ok && ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+  }
+  if (!ok)
+  {
+    bad(
+      std::string(what) + ": \"" + key + "\" must be 16 lowercase hex digits");
+  }
+  return std::stoull(s, nullptr, 16);
+}
+
+const json& get_array(const json& j, const char* key)
+{
+  const json& v = j.at(key);
+  if (!v.is_array())
+  {
+    bad(std::string("\"") + key + "\" must be an array");
+  }
+  return v;
+}
+
+// ---- paths ------------------------------------------------------------------
+
+// `p` is relative, has only normal components, and starts with the
+// components of `prefix` followed by at least one more.
+void check_path(const std::string& p, const std::string& prefix)
+{
+  if (p.empty() || p.front() == '/' || p.back() == '/')
+  {
+    bad("bad path \"" + p + "\"");
+  }
+  std::size_t start = 0;
+  while (start <= p.size())
+  {
+    std::size_t end = p.find('/', start);
+    if (end == std::string::npos)
+    {
+      end = p.size();
+    }
+    const std::string_view c(p.data() + start, end - start);
+    if (c.empty() || c == "." || c == "..")
+    {
+      bad("bad path \"" + p + "\"");
+    }
+    start = end + 1;
+  }
+  if (
+    p.size() <= prefix.size() + 1 || p.compare(0, prefix.size(), prefix) ||
+    p[prefix.size()] != '/')
+  {
+    bad("path \"" + p + "\" is not under " + prefix + "/");
+  }
+}
+
+std::string read_file(const fs::path& p)
+{
+  std::ifstream in(p, std::ios::binary);
+  if (!in)
+  {
+    throw std::runtime_error(std::string(kWho) + ": cannot read " + p.string());
+  }
+  std::ostringstream ss;
+  ss << in.rdbuf();
+  return ss.str();
+}
+
+std::int64_t now_s()
+{
+  return std::chrono::duration_cast<std::chrono::seconds>(
+           std::chrono::system_clock::now().time_since_epoch())
+    .count();
+}
+
+// Parses "MANIFEST-<16 hex>.json"; nullopt for any other name.
+std::optional<std::uint64_t> manifest_seq(const std::string& name)
+{
+  constexpr std::string_view pre = "MANIFEST-", post = ".json";
+  if (
+    name.size() != pre.size() + 16 + post.size() ||
+    name.compare(0, pre.size(), pre) ||
+    name.compare(pre.size() + 16, post.size(), post))
+  {
+    return std::nullopt;
+  }
+  const std::string hex = name.substr(pre.size(), 16);
+  for (char c : hex)
+  {
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+    {
+      return std::nullopt;
+    }
+  }
+  return std::stoull(hex, nullptr, 16);
+}
+
+struct CurrentRecord
+{
+  std::uint64_t seq = 0;
+  std::uint32_t crc = 0;
+};
+
+std::string format_current(const CurrentRecord& r)
+{
+  char buf[64];
+  std::snprintf(
+    buf, sizeof buf, "%s %d %" PRIu64 " %08" PRIx32 "\n", kCurrentMagic,
+    kCurrentVersion, r.seq, r.crc);
+  return buf;
+}
+
+std::optional<CurrentRecord> read_current(const fs::path& root)
+{
+  const fs::path p = root / "manifest" / kCurrent;
+  std::error_code ec;
+  if (!fs::exists(p, ec))
+  {
+    return std::nullopt;
+  }
+  const std::string text = read_file(p);
+  char magic[16] = {};
+  int version = 0;
+  unsigned long long seq = 0;
+  unsigned crc = 0;
+  int consumed = 0;
+  if (
+    text.size() > 60 ||
+    std::sscanf(
+      text.c_str(), "%15s %d %llu %8x\n%n", magic, &version, &seq, &crc,
+      &consumed) != 4 ||
+    std::strcmp(magic, kCurrentMagic) != 0 || version != kCurrentVersion ||
+    static_cast<std::size_t>(consumed) != text.size() ||
+    format_current({seq, crc}) != text || seq == 0)
+  {
+    corrupt(p, "malformed");
+  }
+  return CurrentRecord{seq, crc};
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Entries and Manifest
+// ---------------------------------------------------------------------------
+
+SegmentEntry SegmentEntry::from_segment(
+  const fs::path& root,
+  const ObsSegment& seg)
+{
+  const fs::path rel = seg.path().lexically_relative(root);
+  if (rel.empty() || rel.is_absolute() || *rel.begin() == "..")
+  {
+    bad(seg.path().string() + " is not under " + root.string());
+  }
+  SegmentEntry e;
+  e.source = std::string(seg.source_name());
+  e.bucket_start_s = seg.bucket_start_s();
+  e.path = rel.generic_string();
+  e.receipt_seq_min = seg.receipt_seq_min();
+  e.receipt_seq_max = seg.receipt_seq_max();
+  e.report_count = seg.size();
+  e.header_crc = seg.header_crc();
+  return e;
+}
+
+std::string Manifest::file_name(std::uint64_t seq)
+{
+  char buf[32];
+  std::snprintf(buf, sizeof buf, "MANIFEST-%016" PRIx64 ".json", seq);
+  return buf;
+}
+
+void Manifest::validate() const
+{
+  if (next_receipt_seq == 0)
+  {
+    bad("next_receipt_seq must be >= 1");
+  }
+  std::set<std::string> paths;
+  auto add_path = [&](const std::string& p)
+  {
+    if (!paths.insert(p).second)
+    {
+      bad("path \"" + p + "\" listed twice");
+    }
+  };
+
+  if (stations)
+  {
+    if (stations->generation == 0)
+    {
+      bad("stations: generation must be >= 1");
+    }
+    const std::string want =
+      "stations/" + StationTable::file_name(stations->generation);
+    if (stations->path != want)
+    {
+      bad("stations: path must be \"" + want + "\"");
+    }
+    add_path(stations->path);
+  }
+
+  std::set<GridKey> keys;
+  for (const auto& g : grids)
+  {
+    const std::string want = "grids/" + key_hex(g.key) + ".grid";
+    if (g.path != want)
+    {
+      bad("grid: path must be \"" + want + "\"");
+    }
+    if (!keys.insert(g.key).second)
+    {
+      bad("grid " + key_hex(g.key) + " listed twice");
+    }
+    add_path(g.path);
+  }
+
+  std::set<std::tuple<std::string, std::int64_t, std::uint32_t>> fids;
+  for (const auto& f : fields)
+  {
+    if (!SourceClass::valid_name(f.model))
+    {
+      bad("field: bad model name \"" + f.model + "\"");
+    }
+    check_path(f.path, "fields/" + f.model);
+    if (!keys.count(f.grid_key))
+    {
+      bad("field " + f.path + ": grid " + key_hex(f.grid_key) + " not listed");
+    }
+    if (!fids.insert({f.model, f.run_s, f.fhr}).second)
+    {
+      bad("field " + f.path + ": (model, run, fhr) listed twice");
+    }
+    add_path(f.path);
+  }
+
+  for (const auto& s : segments)
+  {
+    if (!sources.find(s.source))
+    {
+      bad("segment " + s.path + ": unknown source \"" + s.source + "\"");
+    }
+    check_path(s.path, "obs/" + s.source);
+    if (s.report_count == 0)
+    {
+      if (s.receipt_seq_min != 0 || s.receipt_seq_max != 0)
+      {
+        bad("segment " + s.path + ": empty but has receipt seqs");
+      }
+    }
+    else if (
+      s.receipt_seq_min == 0 || s.receipt_seq_min > s.receipt_seq_max ||
+      s.receipt_seq_max >= next_receipt_seq)
+    {
+      bad(
+        "segment " + s.path +
+        ": receipt seqs must satisfy 1 <= min <= max < next_receipt_seq");
+    }
+    add_path(s.path);
+  }
+}
+
+json Manifest::to_json() const
+{
+  json j;
+  j["format"] = kFormat;
+  j["version"] = kVersion;
+  j["seq"] = seq;
+  j["created_at"] = created_at_s;
+  j["next_receipt_seq"] = next_receipt_seq;
+  j["sources"] = sources.to_json();
+  if (stations)
+  {
+    j["stations"] = json{
+      {"generation", stations->generation},
+      {"path", stations->path},
+      {"header_crc", stations->header_crc}};
+  }
+  else
+  {
+    j["stations"] = nullptr;
+  }
+  json g = json::array();
+  for (const auto& e : grids)
+  {
+    g.push_back(
+      {{"key", key_hex(e.key)},
+       {"path", e.path},
+       {"header_crc", e.header_crc}});
+  }
+  j["grids"] = std::move(g);
+  json f = json::array();
+  for (const auto& e : fields)
+  {
+    f.push_back(
+      {{"model", e.model},
+       {"run", e.run_s},
+       {"fhr", e.fhr},
+       {"grid_key", key_hex(e.grid_key)},
+       {"path", e.path},
+       {"header_crc", e.header_crc}});
+  }
+  j["fields"] = std::move(f);
+  json s = json::array();
+  for (const auto& e : segments)
+  {
+    s.push_back(
+      {{"source", e.source},
+       {"bucket_start", e.bucket_start_s},
+       {"path", e.path},
+       {"receipt_seq_min", e.receipt_seq_min},
+       {"receipt_seq_max", e.receipt_seq_max},
+       {"report_count", e.report_count},
+       {"header_crc", e.header_crc}});
+  }
+  j["segments"] = std::move(s);
+  return j;
+}
+
+std::string Manifest::to_text() const
+{
+  return to_json().dump(1, ' ') + "\n";
+}
+
+Manifest Manifest::from_json(const json& j)
+{
+  check_keys(
+    j, "manifest",
+    {"format", "version", "seq", "created_at", "next_receipt_seq", "sources",
+     "stations", "grids", "fields", "segments"});
+  if (!j.at("format").is_string() || j.at("format") != kFormat)
+  {
+    bad(std::string("\"format\" must be \"") + kFormat + "\"");
+  }
+  if (!j.at("version").is_number_integer() || j.at("version") != kVersion)
+  {
+    bad("unsupported \"version\" (want " + std::to_string(kVersion) + ")");
+  }
+  Manifest m;
+  m.seq = get_u64(j, "seq", "manifest");
+  m.created_at_s = get_i64(j, "created_at", "manifest");
+  m.next_receipt_seq = get_u64(j, "next_receipt_seq", "manifest");
+  m.sources = SourceRegistry::from_json(j.at("sources"));
+
+  const json& st = j.at("stations");
+  if (!st.is_null())
+  {
+    check_keys(st, "stations", {"generation", "path", "header_crc"});
+    StationsEntry e;
+    e.generation = get_u64(st, "generation", "stations");
+    e.path = get_str(st, "path", "stations");
+    e.header_crc = get_u32(st, "header_crc", "stations");
+    m.stations = e;
+  }
+  for (const auto& g : get_array(j, "grids"))
+  {
+    check_keys(g, "grid", {"key", "path", "header_crc"});
+    GridEntry e;
+    e.key = get_key(g, "key", "grid");
+    e.path = get_str(g, "path", "grid");
+    e.header_crc = get_u32(g, "header_crc", "grid");
+    m.grids.push_back(std::move(e));
+  }
+  for (const auto& f : get_array(j, "fields"))
+  {
+    check_keys(
+      f, "field", {"model", "run", "fhr", "grid_key", "path", "header_crc"});
+    FieldEntry e;
+    e.model = get_str(f, "model", "field");
+    e.run_s = get_i64(f, "run", "field");
+    e.fhr = get_u32(f, "fhr", "field");
+    e.grid_key = get_key(f, "grid_key", "field");
+    e.path = get_str(f, "path", "field");
+    e.header_crc = get_u32(f, "header_crc", "field");
+    m.fields.push_back(std::move(e));
+  }
+  for (const auto& s : get_array(j, "segments"))
+  {
+    check_keys(
+      s, "segment",
+      {"source", "bucket_start", "path", "receipt_seq_min", "receipt_seq_max",
+       "report_count", "header_crc"});
+    SegmentEntry e;
+    e.source = get_str(s, "source", "segment");
+    e.bucket_start_s = get_i64(s, "bucket_start", "segment");
+    e.path = get_str(s, "path", "segment");
+    e.receipt_seq_min = get_u64(s, "receipt_seq_min", "segment");
+    e.receipt_seq_max = get_u64(s, "receipt_seq_max", "segment");
+    e.report_count = get_u64(s, "report_count", "segment");
+    e.header_crc = get_u32(s, "header_crc", "segment");
+    m.segments.push_back(std::move(e));
+  }
+  m.validate();
+  return m;
+}
+
+Manifest Manifest::from_text(std::string_view text)
+{
+  json j;
+  try
+  {
+    j = json::parse(text.begin(), text.end());
+  }
+  catch (const json::exception& e)
+  {
+    bad(std::string("invalid JSON: ") + e.what());
+  }
+  return from_json(j);
+}
+
+// ---------------------------------------------------------------------------
+// Reading
+// ---------------------------------------------------------------------------
+
+std::optional<std::uint64_t> read_current_seq(const fs::path& root)
+{
+  const auto r = read_current(root);
+  if (!r)
+  {
+    return std::nullopt;
+  }
+  return r->seq;
+}
+
+std::optional<Manifest> read_current_manifest(const fs::path& root)
+{
+  // A publish can replace CURRENT and prune the manifest it named between
+  // our two reads; CURRENT then names a newer seq, so try again.
+  for (int attempt = 0;; ++attempt)
+  {
+    const auto r = read_current(root);
+    if (!r)
+    {
+      return std::nullopt;
+    }
+    const fs::path p = root / "manifest" / Manifest::file_name(r->seq);
+    std::string text;
+    try
+    {
+      text = read_file(p);
+    }
+    catch (const std::runtime_error&)
+    {
+      const auto again = read_current(root);
+      if (attempt < 3 && again && again->seq != r->seq)
+      {
+        continue;
+      }
+      throw;
+    }
+    if (crc32(text.data(), text.size()) != r->crc)
+    {
+      corrupt(p, "checksum does not match CURRENT");
+    }
+    Manifest m;
+    try
+    {
+      m = Manifest::from_text(text);
+    }
+    catch (const std::invalid_argument& e)
+    {
+      corrupt(p, e.what());
+    }
+    if (m.seq != r->seq)
+    {
+      corrupt(p, "seq does not match file name");
+    }
+    return m;
+  }
+}
+
+Manifest read_manifest(const fs::path& root, std::uint64_t seq)
+{
+  const fs::path p = root / "manifest" / Manifest::file_name(seq);
+  Manifest m;
+  try
+  {
+    m = Manifest::from_text(read_file(p));
+  }
+  catch (const std::invalid_argument& e)
+  {
+    corrupt(p, e.what());
+  }
+  if (m.seq != seq)
+  {
+    corrupt(p, "seq does not match file name");
+  }
+  return m;
+}
+
+// ---------------------------------------------------------------------------
+// ManifestPublisher
+// ---------------------------------------------------------------------------
+
+ManifestPublisher::ManifestPublisher(fs::path root, std::size_t keep)
+    : root_(std::move(root)), dir_(root_ / "manifest"), keep_(keep)
+{
+  if (keep_ == 0)
+  {
+    bad("keep must be >= 1");
+  }
+  fs::create_directories(dir_);
+  const fs::path lock = dir_ / kLock;
+  lock_fd_ = ::open(lock.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+  if (lock_fd_ < 0)
+  {
+    corrupt(lock, std::string("cannot open: ") + std::strerror(errno));
+  }
+  if (::flock(lock_fd_, LOCK_EX | LOCK_NB) != 0)
+  {
+    const int err = errno;
+    ::close(lock_fd_);
+    lock_fd_ = -1;
+    corrupt(
+      lock, err == EWOULDBLOCK ? "held by another publisher"
+                               : std::string("flock: ") + std::strerror(err));
+  }
+  try
+  {
+    recover();
+  }
+  catch (...)
+  {
+    ::close(lock_fd_);
+    lock_fd_ = -1;
+    throw;
+  }
+}
+
+ManifestPublisher::~ManifestPublisher()
+{
+  if (lock_fd_ >= 0)
+  {
+    ::close(lock_fd_);  // releases the flock
+  }
+}
+
+void ManifestPublisher::recover()
+{
+  if (auto m = read_current_manifest(root_))
+  {
+    current_ = std::move(*m);
+  }
+  // Anything above CURRENT was never published: no reader can depend on it,
+  // and leaving it would make the next publish collide with it.
+  bool removed = false;
+  for (const auto& e : fs::directory_iterator(dir_))
+  {
+    const std::string name = e.path().filename().string();
+    const auto s = manifest_seq(name);
+    if (
+      (s && *s > current_.seq) || name == kCurrentTmp ||
+      name.find(".tmp.") != std::string::npos)
+    {
+      fs::remove(e.path());
+      removed = true;
+    }
+  }
+  if (removed)
+  {
+    detail::fsync_dir(dir_, kWho);
+  }
+}
+
+void ManifestPublisher::set_fault_hook(std::function<void(PublishStep)> hook)
+{
+  hook_ = std::move(hook);
+}
+
+void ManifestPublisher::fault(PublishStep s) const
+{
+  if (hook_)
+  {
+    hook_(s);
+  }
+}
+
+const Manifest& ManifestPublisher::publish(Manifest next)
+{
+  next.seq = current_.seq + 1;
+  next.created_at_s = now_s();
+  next.validate();
+  if (next.next_receipt_seq < current_.next_receipt_seq)
+  {
+    bad("next_receipt_seq must not go backwards");
+  }
+  if (
+    current_.stations && (!next.stations || next.stations->generation <
+                                              current_.stations->generation))
+  {
+    bad("station generation must not go backwards");
+  }
+  auto must_exist = [&](const std::string& p)
+  {
+    std::error_code ec;
+    if (!fs::is_regular_file(root_ / p, ec))
+    {
+      bad("file " + p + " does not exist");
+    }
+  };
+  if (next.stations)
+  {
+    must_exist(next.stations->path);
+  }
+  for (const auto& g : next.grids)
+  {
+    must_exist(g.path);
+  }
+  for (const auto& f : next.fields)
+  {
+    must_exist(f.path);
+  }
+  for (const auto& s : next.segments)
+  {
+    must_exist(s.path);
+  }
+
+  // Step 2: the manifest itself.
+  const std::string text = next.to_text();
+  detail::publish_file(
+    dir_ / Manifest::file_name(next.seq),
+    std::vector<unsigned char>(text.begin(), text.end()), kWho);
+  fault(PublishStep::manifest_written);
+
+  // Step 3: CURRENT.tmp -> fsync -> rename -> fsync dir.
+  const std::string cur =
+    format_current({next.seq, crc32(text.data(), text.size())});
+  const fs::path tmp = dir_ / kCurrentTmp;
+  const int fd =
+    ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  if (fd < 0)
+  {
+    corrupt(tmp, std::string("cannot create: ") + std::strerror(errno));
+  }
+  try
+  {
+    detail::write_all(fd, cur.data(), cur.size(), 0, kWho);
+    if (::fsync(fd) != 0)
+    {
+      corrupt(tmp, "fsync failed");
+    }
+  }
+  catch (...)
+  {
+    ::close(fd);
+    throw;
+  }
+  ::close(fd);
+  fault(PublishStep::current_written);
+
+  if (::rename(tmp.c_str(), (dir_ / kCurrent).c_str()) != 0)
+  {
+    corrupt(tmp, std::string("rename failed: ") + std::strerror(errno));
+  }
+  // From here on the new manifest is the published state.
+  current_ = std::move(next);
+  fault(PublishStep::current_renamed);
+  detail::fsync_dir(dir_, kWho);
+
+  prune();
+  return current_;
+}
+
+void ManifestPublisher::prune() const
+{
+  if (current_.seq <= keep_)
+  {
+    return;
+  }
+  const std::uint64_t oldest_kept = current_.seq - keep_ + 1;
+  for (const auto& e : fs::directory_iterator(dir_))
+  {
+    const auto s = manifest_seq(e.path().filename().string());
+    if (s && *s < oldest_kept)
+    {
+      std::error_code ec;
+      fs::remove(e.path(), ec);  // best effort; gc retries later
+    }
+  }
+}
+
+}  // namespace atmo

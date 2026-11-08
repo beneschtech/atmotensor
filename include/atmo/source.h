@@ -75,6 +75,8 @@ class SourceRegistry
   SourceRegistry() = default;
   explicit SourceRegistry(std::vector<SourceClass> classes);
 
+  bool operator==(const SourceRegistry&) const = default;
+
   static constexpr const char* kFormat = "atmo-sources";
   static constexpr int kVersion = 1;
 
