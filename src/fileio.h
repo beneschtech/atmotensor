@@ -23,6 +23,33 @@ void write_all(
 // fsync a directory; std::runtime_error on failure.
 void fsync_dir(const std::filesystem::path& dir, const char* who);
 
+// A file written in place under a temporary name next to `path`
+// ("<path>.tmp.<pid>.<n>"; gc removes leftovers) and published as `path`
+// by publish(): fsync -> link() (fails if `path` exists) -> unlink temp ->
+// fsync directory (and any parent directories the constructor created).
+// The destructor removes the temp file unless it was published.
+class TempFile
+{
+ public:
+  TempFile(std::filesystem::path path, const char* who);
+  ~TempFile();
+  TempFile(const TempFile&) = delete;
+  TempFile& operator=(const TempFile&) = delete;
+
+  int fd() const { return fd_; }
+  const std::filesystem::path& path() const { return path_; }
+  // pwrite() all of buf at off; std::runtime_error on failure.
+  void write(const void* buf, std::size_t n, std::size_t off);
+  void publish();
+
+ private:
+  std::filesystem::path path_, tmp_;
+  const char* who_;
+  std::vector<std::filesystem::path> created_;
+  int fd_ = -1;
+  bool published_ = false;
+};
+
 // Publishes `bytes` as `path`: temp file in the same directory -> fsync ->
 // link() to the final name (fails if it exists, so a published file is
 // never replaced) -> unlink temp -> fsync directory.  Creates missing

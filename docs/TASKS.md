@@ -51,12 +51,19 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       `retired` list maintained by publish(), segment entries carry
       `bucket_seconds`, `ManifestPublisher::collect_garbage()` and
       `set_clock()`. See 02-manifest-and-processes.md "Retirement".
-- [ ] T7  Field file write/read (03-field-tiles.md) + `sample()` bilinear
+- [x] T7  Field file write/read (03-field-tiles.md) + `sample()` bilinear
       including periodic halo. Acceptance tests 1-4.
+      Done: `fieldfile.h` (FieldFileWriter streams tiles, FieldFile with
+      lazy tile CRCs, sample/value/tile/require_grid); snapshots now open
+      field files (FieldEntry::from_file, Snapshot::field_file).
 - [ ] T8  Raw journal + replay (02-...md acceptance test 5), group commit.
-- [ ] T8b Variable registry (Q4): checked-in registry file, generator for
+- [x] T8b Variable registry (Q4): checked-in registry file, generator for
       `include/atmo/variables.h` (constants + names + SI units), ~25
       surface/upper-air variables to start; codes never reused.
+      Done (before T8, which only obs feeds need): docs/design/variables.csv
+      (34 variables with GRIB2 discipline/category/number + scale/offset to
+      SI), cmake/gen_variables.cmake (pure CMake), `gen_variables` target,
+      `variables_header` staleness test, lookups in `variable.h`.
 - [ ] T9  Query engine library: `point()` combining Grid::locate, FieldFile
       sample (space, time, log-p), ObsIndex; unit tests on synthetic data.
 - [ ] T10 FastCGI responder library (`include/atmo/fcgi.h`, spec and tests
@@ -66,7 +73,7 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       SnapshotLoader::refresh(), and `?snapshot=<seq>` pinning of a
       retained snapshot. Can start independently of T2-T9
       using a stub handler. Provide an example nginx config under `deploy/`.
-- [ ] T11 Ingest: GRIB2 via eccodes -> GridStore + field files. Identity bytes
+- [x] T11 Ingest: GRIB2 via eccodes -> GridStore + field files. Identity bytes
       = GRIB2 section 3 octets; normalise scan modes; convert to SI. eccodes
       comes from the distro package (D9). CMake: auto-detect (CONFIG package,
       then pkg-config, then find_path/find_library), honour
@@ -75,6 +82,12 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       else (including all existing tests) must still build and pass. Test
       GRIB fixtures: generate tiny GRIB2 files with eccodes itself in a test
       helper rather than checking in large binaries.
+      Done: `grib.h` (GribReader, ingest_grib, add_to_manifest),
+      `tools/atmo_grib_ingest` (decode + publish, dev tool until the ingest
+      daemon). Ubuntu's eccodes CMake config is broken (references the
+      missing libeccodes_f90.so.0), so the config package is probed in a
+      sub-configure (cmake/eccodes_probe) and pkg-config is used there.
+      Message selection policy: Q9.
 - [ ] T11b Derived products (D12): write 06-derived-products.md with Chris
       first (derivation registry format, trigger when inputs complete,
       provenance, versioning, where feature outputs such as fronts live).

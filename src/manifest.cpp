@@ -20,6 +20,7 @@
 #include <tuple>
 
 #include "atmo/crc32.h"
+#include "atmo/fieldfile.h"
 #include "atmo/obs_segment.h"
 #include "atmo/stations.h"
 #include "fileio.h"
@@ -209,6 +210,23 @@ SegmentEntry SegmentEntry::from_segment(
   e.receipt_seq_max = seg.receipt_seq_max();
   e.report_count = seg.size();
   e.header_crc = seg.header_crc();
+  return e;
+}
+
+FieldEntry FieldEntry::from_file(const fs::path& root, const FieldFile& file)
+{
+  const fs::path rel = file.path().lexically_relative(root);
+  if (rel.empty() || rel.is_absolute() || *rel.begin() == "..")
+  {
+    bad(file.path().string() + " is not under " + root.string());
+  }
+  FieldEntry e;
+  e.model = std::string(file.model());
+  e.run_s = file.run_s();
+  e.fhr = file.fhr();
+  e.grid_key = file.grid_key();
+  e.path = rel.generic_string();
+  e.header_crc = file.header_crc();
   return e;
 }
 

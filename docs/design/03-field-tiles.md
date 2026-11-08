@@ -33,6 +33,14 @@ count, section offsets, CRCs), then:
 - tile tables: per field, `tiles_x * tiles_y` entries (offset u64, crc u32)
 - tile slots, 4 KiB aligned, written in field then row-major tile order
 
+As implemented (T7, `include/atmo/fieldfile.h`): the tile slots come right
+after the header page and the directory + tile tables after the slots, so
+the writer streams each field's tiles to disk as it is added instead of
+buffering a whole file (the field count is only known at the end). Every
+offset is still recomputed from the counts. The directory entry also has a
+`flags` byte (bit 0 = grid-relative u/v, from the GRIB component flag);
+`level_type` is GRIB2 code table 4.5, `level_value` SI (Pa, m).
+
 Units: converted to SI at ingest (K, m/s, Pa, kg/m2, ...). Winds are stored as
 the grid-relative components as published; the file records the GRIB component
 flag so the query layer knows whether to `rotate_to_earth` (see CLAUDE.md).

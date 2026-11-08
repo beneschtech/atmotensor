@@ -36,7 +36,7 @@ reports (one row per decoded report), struct-of-arrays:
 - `raw_off u64, raw_len u32`      slice of the segment's raw section.
 
 values (struct-of-arrays, contiguous per report):
-- `var_code u16`  canonical registry (docs to be added in `variables.md`; e.g. air_temperature_K, dewpoint_K, wind_u_ms ...)
+- `var_code u16`  canonical registry: `docs/design/variables.csv` -> generated `include/atmo/variables.h` (`atmo::var::kAirTemperature`, ...; T8b, Q4)
 - `value f32`     SI units
 - `qc u16`        0 = unchecked/ok; nonzero reserved for QC flags
 

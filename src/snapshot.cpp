@@ -84,6 +84,39 @@ Snapshot::Snapshot(const fs::path& root, Manifest m, const Snapshot* previous)
     ++opened_;
   }
 
+  // Field files, checked against their entry and their grid.
+  std::map<std::string, std::pair<const FieldEntry*, FieldPtr>> prev_fields;
+  if (previous)
+  {
+    for (const auto& f : previous->manifest_.fields)
+    {
+      prev_fields[f.path] = {
+        &f, previous->fields_.at({f.model, f.run_s, f.fhr})};
+    }
+  }
+  for (const auto& e : manifest_.fields)
+  {
+    FieldPtr ff;
+    auto it = prev_fields.find(e.path);
+    if (
+      it != prev_fields.end() && *it->second.first == e &&
+      grids_.at(e.grid_key) == previous->grids_.at(e.grid_key))
+    {
+      ff = it->second.second;
+    }
+    else
+    {
+      ff = FieldFile::open(root / e.path);
+      ++opened_;
+      if (FieldEntry::from_file(root, *ff) != e)
+      {
+        mismatch(e.path, "model, run, fhr, grid or header CRC");
+      }
+      ff->require_grid(*grids_.at(e.grid_key));
+    }
+    fields_[{e.model, e.run_s, e.fhr}] = std::move(ff);
+  }
+
   // Segments.
   std::map<std::string, std::pair<const SegmentEntry*, SegPtr>> prev_segs;
   if (previous)
@@ -124,6 +157,15 @@ Snapshot::Snapshot(const fs::path& root, Manifest m, const Snapshot* previous)
 }
 
 Snapshot::~Snapshot() = default;
+
+Snapshot::FieldPtr Snapshot::field_file(
+  std::string_view model,
+  std::int64_t run_s,
+  std::uint32_t fhr) const
+{
+  auto it = fields_.find({std::string(model), run_s, fhr});
+  return it == fields_.end() ? nullptr : it->second;
+}
 
 Snapshot::GridPtr Snapshot::grid(GridKey key) const
 {
