@@ -57,9 +57,13 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       lazy tile CRCs, sample/value/tile/require_grid); snapshots now open
       field files (FieldEntry::from_file, Snapshot::field_file).
 - [ ] T8  Raw journal + replay (02-...md acceptance test 5), group commit.
-- [ ] T8b Variable registry (Q4): checked-in registry file, generator for
+- [x] T8b Variable registry (Q4): checked-in registry file, generator for
       `include/atmo/variables.h` (constants + names + SI units), ~25
       surface/upper-air variables to start; codes never reused.
+      Done (before T8, which only obs feeds need): docs/design/variables.csv
+      (34 variables with GRIB2 discipline/category/number + scale/offset to
+      SI), cmake/gen_variables.cmake (pure CMake), `gen_variables` target,
+      `variables_header` staleness test, lookups in `variable.h`.
 - [ ] T9  Query engine library: `point()` combining Grid::locate, FieldFile
       sample (space, time, log-p), ObsIndex; unit tests on synthetic data.
 - [ ] T10 FastCGI responder library (`include/atmo/fcgi.h`, spec and tests

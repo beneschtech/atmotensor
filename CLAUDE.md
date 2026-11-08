@@ -57,6 +57,9 @@ and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
 - `include/atmo/fieldfile.h` FieldFileWriter / FieldFile: per (model,
   run, fhr) float32 tiles (256 + halo 1, NaN outside, periodic halo wraps),
   lazy per-tile CRC, bilinear `sample(field, Grid::Cell)`
+- `include/atmo/variable.h` VariableInfo + lookups (code, name, GRIB2);
+  `include/atmo/variables.h` is GENERATED from docs/design/variables.csv
+  (edit the CSV, build target `gen_variables`; codes are never reused)
 - `include/atmo/crc32.h`    CRC-32 (zlib-compatible)
 - `include/atmo/source.h`   SourceClass (metric per source class),
   SourceRegistry (JSON config)

@@ -1,0 +1,54 @@
+# AtmoTensor variable registry (Q4, T8b). Source of truth for var_code /
+# param_id. The codes are written into segment and field files, so a code is
+# NEVER reused or renumbered. Retire a variable by leaving its row in place.
+#
+# After editing: cmake --build --preset default --target gen_variables
+# (regenerates include/atmo/variables.h, and the `variables` test fails while
+# the header is stale). The web app imports this file for display/joins.
+# No semicolons, double quotes or backslashes anywhere in this file.
+#
+# Columns:
+#   code         1..65535, unique, never reused (0 = invalid)
+#   name         [a-z][a-z0-9_]*, unique, also the C++ constant (kAirTemperature)
+#   units        units of the stored values: SI, 1 = dimensionless,
+#                fractions rather than percent
+#   grib2_*      WMO GRIB2 discipline / parameter category / parameter number
+#                (code table 4.2, WMO-standard entries < 192 only), empty if the
+#                variable has no GRIB2 source
+#   grib2_scale, grib2_offset   stored = grib * scale + offset (GRIB2 -> units)
+#   description  free text, no commas
+code,name,units,grib2_discipline,grib2_category,grib2_number,grib2_scale,grib2_offset,description
+1,air_temperature,K,0,0,0,1,0,Air temperature
+2,dewpoint_temperature,K,0,0,6,1,0,Dew point temperature
+3,relative_humidity,1,0,1,1,0.01,0,Relative humidity as a fraction
+4,specific_humidity,kg/kg,0,1,0,1,0,Specific humidity
+5,wind_u,m/s,0,2,2,1,0,Wind u component (grid- or earth-relative: see the field flags)
+6,wind_v,m/s,0,2,3,1,0,Wind v component (grid- or earth-relative: see the field flags)
+7,wind_speed,m/s,0,2,1,1,0,Wind speed
+8,wind_direction,deg,0,2,0,1,0,Wind direction (from) in degrees true
+9,wind_gust,m/s,0,2,22,1,0,Wind speed of gusts
+10,vertical_velocity_pressure,Pa/s,0,2,8,1,0,Vertical velocity (omega)
+11,vertical_velocity,m/s,0,2,9,1,0,Vertical velocity (geometric)
+12,absolute_vorticity,1/s,0,2,10,1,0,Absolute vorticity
+13,geopotential_height,m,0,3,5,1,0,Geopotential height (gpm)
+14,pressure,Pa,0,3,0,1,0,Pressure
+15,pressure_msl,Pa,0,3,1,1,0,Pressure reduced to mean sea level
+16,precipitation_amount,kg/m2,0,1,8,1,0,Total precipitation (accumulated)
+17,precipitation_rate,kg/m2/s,0,1,7,1,0,Precipitation rate
+18,precipitable_water,kg/m2,0,1,3,1,0,Precipitable water
+19,snow_depth,m,0,1,11,1,0,Snow depth
+20,snow_water_equivalent,kg/m2,0,1,13,1,0,Water equivalent of accumulated snow depth
+21,cloud_cover_total,1,0,6,1,0.01,0,Total cloud cover as a fraction
+22,cloud_cover_low,1,0,6,3,0.01,0,Low cloud cover as a fraction
+23,cloud_cover_medium,1,0,6,4,0.01,0,Medium cloud cover as a fraction
+24,cloud_cover_high,1,0,6,5,0.01,0,High cloud cover as a fraction
+25,cloud_ceiling,m,0,6,13,1,0,Ceiling
+26,visibility,m,0,19,0,1,0,Visibility
+27,cape,J/kg,0,7,6,1,0,Convective available potential energy
+28,cin,J/kg,0,7,7,1,0,Convective inhibition
+29,lifted_index,K,0,7,0,1,0,Parcel lifted index (to 500 hPa)
+30,temperature_max,K,0,0,4,1,0,Maximum temperature
+31,temperature_min,K,0,0,5,1,0,Minimum temperature
+32,shortwave_down,W/m2,0,4,7,1,0,Downward shortwave radiation flux
+33,longwave_down,W/m2,0,5,3,1,0,Downward longwave radiation flux
+34,altimeter_setting,Pa,,,,,,Altimeter setting (METAR) - no GRIB2 source

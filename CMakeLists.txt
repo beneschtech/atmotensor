@@ -51,7 +51,8 @@ add_library(atmo STATIC
   src/retention.cpp
   src/snapshot.cpp
   src/source.cpp
-  src/stations.cpp)
+  src/stations.cpp
+  src/variable.cpp)
 add_library(atmo::atmo ALIAS atmo)
 target_include_directories(atmo PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
@@ -75,12 +76,29 @@ endif()
 
 if(ATMO_BUILD_TESTS)
   enable_testing()
-  foreach(t kdtree grid source obs obs_index stations manifest refdata retention fieldfile)
+  foreach(t kdtree grid source obs obs_index stations manifest refdata retention fieldfile variables)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} PRIVATE atmo_testkit)
     atmo_target_defaults(test_${t})
     add_test(NAME ${t} COMMAND test_${t})
   endforeach()
+endif()
+
+# Variable registry (Q4): docs/design/variables.csv -> include/atmo/variables.h
+# (checked in).  `gen_variables` regenerates it; the variables_header test
+# fails while it is stale.
+add_custom_target(gen_variables
+  COMMAND ${CMAKE_COMMAND}
+    -DIN=${CMAKE_CURRENT_SOURCE_DIR}/docs/design/variables.csv
+    -DOUT=${CMAKE_CURRENT_SOURCE_DIR}/include/atmo/variables.h
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/gen_variables.cmake
+  COMMENT "Generating include/atmo/variables.h")
+if(ATMO_BUILD_TESTS)
+  add_test(NAME variables_header
+    COMMAND ${CMAKE_COMMAND}
+      -DIN=${CMAKE_CURRENT_SOURCE_DIR}/docs/design/variables.csv
+      -DCHECK=${CMAKE_CURRENT_SOURCE_DIR}/include/atmo/variables.h
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/gen_variables.cmake)
 endif()
 
 if(ATMO_BUILD_BENCH)
