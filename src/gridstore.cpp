@@ -259,6 +259,38 @@ bool GridStore::contains(GridKey key) const
   return std::filesystem::exists(path_for(key));
 }
 
+std::uint32_t GridStore::header_crc(GridKey key) const
+{
+  const auto path = path_for(key);
+  auto bad = [&](const std::string& why)
+  { return std::runtime_error("GridStore: " + path.string() + ": " + why); };
+  const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
+  {
+    throw bad(std::strerror(errno));
+  }
+  FileHeader h;
+  const ssize_t got = ::pread(fd, &h, sizeof h, 0);
+  ::close(fd);
+  if (got != static_cast<ssize_t>(sizeof h))
+  {
+    throw bad("truncated (shorter than header)");
+  }
+  if (std::memcmp(h.magic, "ATGRID01", 8) != 0)
+  {
+    throw bad("bad magic");
+  }
+  if (crc32(&h, offsetof(FileHeader, crc_header)) != h.crc_header)
+  {
+    throw bad("header checksum mismatch");
+  }
+  if (h.key != key)
+  {
+    throw bad("key does not match file name");
+  }
+  return h.crc_header;
+}
+
 std::vector<GridKey> GridStore::list() const
 {
   std::vector<GridKey> keys;

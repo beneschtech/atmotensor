@@ -66,6 +66,13 @@ and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
 - `include/atmo/stations.h` StationTableBuilder / StationTable: immutable
   station generations (typed ids with validity, position periods, stable
   refs); authoritative copy will live in MySQL (D10)
+- `include/atmo/manifest.h` Manifest (strict JSON, relative paths per
+  kind), ManifestPublisher (flock on manifest/LOCK, MANIFEST -> CURRENT.tmp
+  -> rename protocol, keeps last M, cleans up crashed publishes),
+  read_current_manifest()
+- `include/atmo/snapshot.h` Snapshot (every file of one manifest opened up
+  front and checked against its entry, ObsIndex), SnapshotLoader
+  (refresh()/current() over an atomic shared_ptr, reuses unchanged mappings)
 - `src/fileio.h/.cpp` internal: publish_file (temp+fsync+link+dir fsync),
   MappedFile, align_up; shared by every immutable-file writer/reader
 - `third_party/`  vendored single headers (nlohmann/json 3.11.3, MIT); see

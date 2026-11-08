@@ -30,8 +30,12 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       against a brute-force oracle that implements "latest version wins".
       Segments whose stored metric differs from the current source class get
       their tree rebuilt in RAM (Q5b, 05-reference-data.md); test it.
-- [ ] T5  Manifest + snapshot + publisher lock (02-...md). Acceptance tests
+- [x] T5  Manifest + snapshot + publisher lock (02-...md). Acceptance tests
       1-4. Use fork() or a second process for the lock test.
+      Done: `manifest.h` (Manifest JSON, ManifestPublisher, CURRENT
+      readers), `snapshot.h` (Snapshot, SnapshotLoader). Deferred to T10:
+      inotify watch of CURRENT, `?snapshot=<seq>` pinning. Field entries
+      are carried but not opened until T7.
 - [ ] T5b Reference-data import (05-reference-data.md): watch config/,
       validate sources.json and stations.json, keep the previous version on
       error, publish through the manifest (source classes copied into it;
@@ -49,7 +53,10 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       sample (space, time, log-p), ObsIndex; unit tests on synthetic data.
 - [ ] T10 FastCGI responder library (`include/atmo/fcgi.h`, spec and tests
       in 04-query-api.md "FastCGI front end"), then the query daemon skeleton:
-      /healthz, /v1/meta, /v1/point over T9. Can start independently of T2-T9
+      /healthz, /v1/meta, /v1/point over T9. Includes (from T5): watch
+      manifest/CURRENT with inotify + 1 s polling fallback calling
+      SnapshotLoader::refresh(), and `?snapshot=<seq>` pinning of a
+      retained snapshot. Can start independently of T2-T9
       using a stub handler. Provide an example nginx config under `deploy/`.
 - [ ] T11 Ingest: GRIB2 via eccodes -> GridStore + field files. Identity bytes
       = GRIB2 section 3 octets; normalise scan modes; convert to SI. eccodes

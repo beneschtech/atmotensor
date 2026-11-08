@@ -15,6 +15,7 @@
 // so every field on the grid shares the same pages.
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -38,6 +39,9 @@ class GridStore
   std::shared_ptr<const Grid> get(GridKey key) const;
 
   bool contains(GridKey key) const;
+  // CRC of the stored file's header (what manifests record).  Reads and
+  // checks only the header; std::runtime_error if absent or corrupt.
+  std::uint32_t header_crc(GridKey key) const;
   std::vector<GridKey> list() const;
   std::filesystem::path path_for(GridKey key) const;
 
