@@ -316,6 +316,69 @@ TEST(api_watcher_follows_current)
   CHECK(errors.empty());
 }
 
+TEST(api_png_tiles)
+{
+  Store s;
+  SnapshotLoader l(s.td.p);
+  CHECK(l.refresh());
+  QueryApi api(s.td.p, l);
+  const std::string base = "/v1/tiles/hrrr/air_temperature@2m/2025110500/0/";
+  const std::string cmap = "cmap=270:000000,lin,290:ffffff";
+
+  auto r = api.handle(get(base + "6/15/25.png", cmap));
+  CHECK(r.status == 200);
+  CHECK(r.content_type == "image/png");
+  CHECK(r.body.compare(0, 8, std::string("\x89PNG\r\n\x1a\n", 8)) == 0);
+  CHECK(header(r, "Cache-Control") == "public, max-age=31536000, immutable");
+  CHECK(header(r, "X-Atmo-Snapshot") == "1");
+  const std::string etag = header(r, "ETag");
+  CHECK(etag.size() == 18 && etag.front() == '"');
+  // Same request, same bytes; If-None-Match -> 304 without a body.
+  CHECK(api.handle(get(base + "6/15/25.png", cmap)).body == r.body);
+  fcgi::Request cond = get(base + "6/15/25.png", cmap);
+  cond.params["HTTP_IF_NONE_MATCH"] = etag;
+  auto r304 = api.handle(cond);
+  CHECK(
+    r304.status == 304 && r304.body.empty() && header(r304, "ETag") == etag);
+  // Another colormap is another image.
+  auto other =
+    api.handle(get(base + "6/15/25.png", "cmap=270:ff0000,lin,290:00ff00"));
+  CHECK(other.status == 200 && header(other, "ETag") != etag);
+  // HEAD: headers only.
+  CHECK(api.handle(get(base + "6/15/25.png", cmap, "HEAD")).body.empty());
+  // Outside the grid: 200 with a transparent tile, not an error.
+  CHECK(api.handle(get(base + "6/40/20.png", cmap)).status == 200);
+
+  auto code = [&](const std::string& path, const std::string& qs)
+  {
+    auto x = api.handle(get(path, qs));
+    return std::to_string(x.status) + " " +
+           (x.status >= 400 ? body(x)["error"]["code"].get<std::string>() : "");
+  };
+  CHECK(code(base + "6/15/25.png", "") == "400 bad_request");  // no cmap
+  CHECK(code(base + "6/15/25.png", "cmap=1:000000") == "400 bad_request");
+  CHECK(code(base + "6/15/25.png", cmap + "&nodata=xyz") == "400 bad_request");
+  CHECK(
+    code("/v1/tiles/hrrr/air_temperature/2025110500/0/6/15/25.png", cmap) ==
+    "400 bad_request");  // no @level
+  CHECK(
+    code("/v1/tiles/hrrr/air_temperature@2m/20251105/0/6/15/25.png", cmap) ==
+    "400 bad_request");                                          // run format
+  CHECK(code(base + "6/64/25.png", cmap) == "400 bad_request");  // x >= 2^z
+  CHECK(code(base + "6/15/x.png", cmap) == "400 bad_request");
+  CHECK(
+    code("/v1/tiles/gfs/air_temperature@2m/2025110500/0/6/15/25.png", cmap) ==
+    "404 not_found");
+  CHECK(
+    code("/v1/tiles/hrrr/air_temperature@2m/2025110500/5/6/15/25.png", cmap) ==
+    "404 no_time");
+  CHECK(
+    code("/v1/tiles/hrrr/wind_u@10m/2025110500/0/6/15/25.png", cmap) ==
+    "404 no_field");
+  CHECK(code(base + "6/15/25.jpg", cmap) == "404 not_found");
+  CHECK(code("/v1/tiles/hrrr", cmap) == "404 not_found");
+}
+
 int main()
 {
   return tst::run_all();

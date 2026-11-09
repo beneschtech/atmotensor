@@ -200,30 +200,14 @@ Q11 [open] /v1/point details the sketch left open (T9, query.h). As
     g) (T10) ?snapshot=<seq> responses are Cache-Control: public,
        max-age=86400; live ones no-store. A pinned snapshot whose files
        expired answers 410, one no longer retained 404.
-Q12 [decided by Chris 2026-11-08, format open] Map tiles are PNG,
-    coloured on the back end with colormaps (the product manifest's
-    colormap type: ../product_manifest.json). Contract draft in
-    docs/api/query-api-v1.md (/v1/tiles/{model}/{field}/{run}/{fhr}/
-    {z}/{x}/{y}.png?colormap=, /v1/colormaps). To settle: the colormap
-    export format (config/colormaps.json from the web app, like
-    sources.json: name, units, stops value->colour, interpolation
-    linear|log|exponential|step, below/above colours), default colormap
-    per variable, tile resampling (bilinear from the grid per pixel),
-    and whether the run segment accepts "latest" (would make tiles
-    mutable, so probably not).
-    T10c as built (2026-11-08): GRIB files hard-linked unchanged into
-    data/grib/<model>/<run>/ with <file>.idx.json (offset, length, FNV-1a
-    content hash, variable, level, fhr, grid per usable message); manifest
-    `gribs` entries; GribCache keyed by the content hash holding the
-    decoded doubles in normalised order plus a shared_ptr to the grid
-    (lats/lons shared per grid, Chris agreed); in-use = shared_ptr held
-    (replaces the atomic_bool, which cannot count two readers). Purge on
-    insert: over the byte budget -> down to purge_to of it; RSS over the
-    limit -> shed the oldest unused 25% per insert; maintain() every 5 s
-    in atmo_queryd drops all unused entries while RSS is over the limit,
-    then malloc_trim. GFS 0.25 f000: ingest 0.97 s, ~0 extra disk (link)
-    + 119 KB index; cold query ~30-45 ms per message decoded, warm 0.14 ms.
-    Follow-ups: altitude queries decode gh on every isobaric level to find
-    the bracket (562 ms cold) - estimate it with a standard atmosphere and
-    decode only the neighbours; keep the T7 tiles only if a hot set needs
-    them.
+Q12 [decided by Chris 2026-11-08; implemented in T10b] PNG map tiles,
+    coloured on the server. Colormaps are per user and per product, owned
+    by the web app; they travel IN EACH TILE REQUEST (`cmap=` query
+    parameter), not via SQL (D10: engine never talks to MySQL; tiles stay
+    immutable and cacheable; no colormap state in the engine). Syntax:
+    value:RRGGBB[AA] stops joined by lin|log|exp|step segment types, 2-64
+    stops ("if someone has a 256 entry colormap, they need to rethink
+    their life"). Below the first stop -> first colour, above the last ->
+    last colour; anything else goes into the colormap itself. Single
+    optional `nodata` colour, default transparent. No built-in colormap
+    registry and no /v1/colormaps. Contract: docs/api/query-api-v1.md.

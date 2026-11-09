@@ -13,7 +13,7 @@ Every endpoint is marked:
   marked Stable. Build against it only behind a feature switch.
 
 Engine design docs behind this: `docs/design/04-query-api.md`; open decisions
-in `docs/QUESTIONS.md` (Q11 point details, Q12 tiles/colormaps).
+in `docs/QUESTIONS.md` (Q11 point details, Q12 tiles/colormaps: decided).
 
 ## 1. Transport
 
@@ -197,45 +197,72 @@ Rules:
 - `obs`: ordered by source, then distance. `distance` is in the source's
   space-time metric (km). `raw` is the original message text.
 
-### GET /v1/tiles/{model}/{field}/{run}/{fhr}/{z}/{x}/{y}.png — Draft
+### GET /v1/tiles/{model}/{field}/{run}/{fhr}/{z}/{x}/{y}.png — Stable
 
-Rendered map tiles for MapLibre (`raster` source, XYZ scheme, Web Mercator,
-256 × 256 px).
+Rendered map tiles for MapLibre: `raster` source, XYZ scheme, Web
+Mercator, 256 × 256 px, PNG RGBA. Colours are assigned on the server from
+the colormap in the request; the client only stacks layers
+(`raster-opacity`).
 
-- `{field}`: a field spec with an explicit level (`air_temperature@2m`).
-- `{run}`: `YYYYmmddHH` (`2026110818`), from `/v1/meta`.
-- `{fhr}`: integer forecast hour.
-- Query `colormap=<name>` (default: the variable's default colormap).
-- PNG, RGBA. Pixels with no data (outside the grid, masked) are fully
-  transparent. Colours come from the colormap: the engine assigns colours,
-  the client only stacks layers (`raster-opacity`).
-- A (run, fhr) tile never changes once published: `Cache-Control: public,
-  max-age=31536000, immutable` and a stable `ETag`; nginx may cache them.
-- `404 no_field` / `no_time` for data that does not exist.
+| Part | Meaning |
+|---|---|
+| `{model}` | From `/v1/meta`. Unknown → `404 not_found`. |
+| `{field}` | Field spec **with** an explicit level, e.g. `air_temperature@2m`, `wind_u@850hPa` (`@` raw or `%40`). The level must be stored (no vertical interpolation in tiles). Without `@level` → 400. |
+| `{run}` | `YYYYmmddHH` (UTC), e.g. `2026110818`, from `/v1/meta` runs. |
+| `{fhr}` | Integer forecast hour of that run. |
+| `{z}/{x}/{y}` | Tile address, `z` 0–24, `x`,`y` < 2^z. |
+| `cmap` (query, required) | The colormap, see below. |
+| `nodata` (query, optional) | `RRGGBB` or `RRGGBBAA` for missing values on the grid. Default: transparent. |
+| `snapshot` (query, optional) | As everywhere. |
 
-MapLibre source example (when Stable):
+**Colormap syntax** (`cmap`): stops separated by segment types,
+
+    stop,type,stop[,type,stop]...      2 to 64 stops, values strictly increasing
+    stop = <value>:<RRGGBB or RRGGBBAA>   value in the field's SI units (see /v1/meta)
+    type = lin | log | exp | step
+
+Example (2 m temperature, K):
+`cmap=233.15:2c0f60,lin,253.15:3b82f6,lin,273.15:ffffff,lin,293.15:f59e0b,lin,313.15:7f1d1d`
+
+- Between two stops a and b, with u = (v − a)/(b − a), the colour is the
+  start colour mixed toward the end colour by t (per RGBA channel):
+  `lin` t = u; `log` t = log10(1 + 9u) (more detail at the low end);
+  `exp` t = (10^u − 1)/9 (more detail at the high end); `step` t = 0
+  (the start colour up to the next stop).
+- **Below the first stop: the first colour. Above the last stop: the last
+  colour.** Anything else (e.g. transparent outside a range) goes into the
+  colormap itself, e.g. a transparent first stop with `step`.
+- Missing values on the grid get `nodata`. Pixels off the model's grid are
+  always transparent.
+- More than 64 stops, or any syntax error → `400 bad_request` with the
+  reason.
+- The colormap travels with every request; the engine stores none. Per-user
+  and per-product colormaps live in the web app, which writes them into the
+  tile URLs. Equal URLs are equal images, so they cache well.
+
+Responses:
+
+- `200 image/png` for a tile with data, and also for a tile entirely
+  outside the model's grid (fully transparent), so a regional model at low
+  zoom does not produce errors.
+- `Cache-Control: public, max-age=31536000, immutable` and an `ETag`;
+  `If-None-Match` with that ETag → `304` without a body.
+- `404 no_time` (no such run/fhr), `404 no_field` (field not stored at that
+  level), `404 not_found` (unknown model or malformed path).
+- Winds are earth-relative (grid-relative u/v are rotated per pixel).
+
+MapLibre source:
 
 ```js
 map.addSource('gfs-t2m', {
   type: 'raster', tileSize: 256,
-  tiles: ['/v1/tiles/gfs/air_temperature@2m/2026110818/0/{z}/{x}/{y}.png?colormap=temperature'],
+  tiles: ['/v1/tiles/gfs/air_temperature@2m/2026110818/0/{z}/{x}/{y}.png'
+          + '?cmap=' + encodeURIComponent(userColormap)],
 });
 ```
 
-### GET /v1/colormaps and /v1/colormaps/{name} — Draft
-
-The colour scale behind tiles, for legends (decision D11: the engine returns
-the colour scale as data).
-
-```json
-{"name": "temperature", "units": "K",
- "stops": [{"value": 233.15, "color": "#2c0f60"}, {"value": 313.15, "color": "#ffef9c"}],
- "interpolation": "linear", "below": "#2c0f60", "above": "#ffef9c"}
-```
-
-Colormaps are defined in the web app (product manifest) and exported to the
-engine like the other reference data (`config/colormaps.json`, format to be
-fixed in Q12).
+Performance on GFS 0.25°: ~6 ms per tile once the message is decoded;
+the first tile of a (field, run, fhr) also decodes it (~30–250 ms).
 
 ### POST /v1/route — Draft
 

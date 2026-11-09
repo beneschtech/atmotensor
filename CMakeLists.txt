@@ -37,6 +37,7 @@ endfunction()
 # compilers/targets that have FMA); it is PUBLIC because templates such as
 # KdTree4 and embed() are compiled in the users' translation units.
 add_library(atmo STATIC
+  src/colormap.cpp
   src/crc32.cpp
   src/fcgi.cpp
   src/fieldfile.cpp
@@ -50,12 +51,14 @@ add_library(atmo STATIC
   src/fileio.cpp
   src/obs_index.cpp
   src/obs_segment.cpp
+  src/png.cpp
   src/query.cpp
   src/refdata.cpp
   src/retention.cpp
   src/snapshot.cpp
   src/source.cpp
   src/stations.cpp
+  src/tiles.cpp
   src/variable.cpp)
 add_library(atmo::atmo ALIAS atmo)
 target_include_directories(atmo PUBLIC
@@ -71,6 +74,20 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(atmo PUBLIC -ffp-contract=off)
 endif()
 atmo_target_defaults(atmo)
+
+# PNG tiles (T10b): zlib compresses them when available; without it PNGs
+# are written with stored (uncompressed) deflate blocks.
+option(ATMO_WITH_ZLIB "Compress PNG tiles with zlib if found" ON)
+if(ATMO_WITH_ZLIB)
+  find_package(ZLIB QUIET)
+  if(ZLIB_FOUND)
+    target_link_libraries(atmo PUBLIC ZLIB::ZLIB)
+    target_compile_definitions(atmo PRIVATE ATMO_HAVE_ZLIB=1)
+    message(STATUS "AtmoTensor: zlib ${ZLIB_VERSION_STRING} for PNG tiles")
+  else()
+    message(STATUS "AtmoTensor: zlib not found, PNG tiles uncompressed")
+  endif()
+endif()
 
 # GRIB2 ingest (T11, D9): eccodes from the distro package, or a hand-built
 # copy via -DECCODES_ROOT=/prefix (or CMAKE_PREFIX_PATH).  Detection order:
@@ -166,7 +183,7 @@ atmo_target_defaults(atmo_queryd)
 
 if(ATMO_BUILD_TESTS)
   enable_testing()
-  foreach(t kdtree grid source obs obs_index stations manifest refdata retention fieldfile variables query fcgi http_api gribstore)
+  foreach(t kdtree grid source obs obs_index stations manifest refdata retention fieldfile variables query fcgi http_api gribstore colormap tiles)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} PRIVATE atmo_testkit)
     atmo_target_defaults(test_${t})

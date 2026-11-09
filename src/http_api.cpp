@@ -5,9 +5,15 @@
 #include <sys/inotify.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <optional>
 #include <stdexcept>
+#include <vector>
+
+#include "atmo/colormap.h"
+#include "atmo/tiles.h"
 
 namespace atmo
 {
@@ -254,7 +260,9 @@ fcgi::Response QueryApi::handle(const fcgi::Request& req) const
     {
       throw HttpError(400, "bad_request", e.what());
     }
-    if (path != "/healthz" && path != "/v1/meta" && path != "/v1/point")
+    const bool tiles = path.rfind("/v1/tiles/", 0) == 0;
+    if (
+      path != "/healthz" && path != "/v1/meta" && path != "/v1/point" && !tiles)
     {
       throw HttpError(404, "not_found", "no such endpoint: " + path);
     }
@@ -289,6 +297,11 @@ fcgi::Response QueryApi::handle(const fcgi::Request& req) const
     if (!v.snap)
     {
       throw HttpError(503, "no_snapshot", "no snapshot loaded yet");
+    }
+
+    if (tiles)
+    {
+      return tile(path, q, req, v);
     }
 
     json body;
@@ -393,6 +406,132 @@ fcgi::Response QueryApi::handle(const fcgi::Request& req) const
   {
     return error_response(e.status, e.code, e.what());
   }
+}
+
+fcgi::Response QueryApi::tile(
+  const std::string& path,
+  const std::map<std::string, std::string>& q,
+  const fcgi::Request& req,
+  const View& v) const
+{
+  // /v1/tiles/{model}/{field}/{run}/{fhr}/{z}/{x}/{y}.png
+  std::vector<std::string> seg;
+  std::size_t start = std::string("/v1/tiles/").size();
+  while (start <= path.size())
+  {
+    std::size_t end = path.find('/', start);
+    if (end == std::string::npos)
+    {
+      end = path.size();
+    }
+    seg.push_back(path.substr(start, end - start));
+    start = end + 1;
+  }
+  if (
+    seg.size() != 7 || seg[6].size() < 5 ||
+    seg[6].compare(seg[6].size() - 4, 4, ".png") != 0)
+  {
+    throw HttpError(
+      404, "not_found",
+      "expected /v1/tiles/{model}/{field}/{run}/{fhr}/{z}/{x}/{y}.png");
+  }
+  seg[6].resize(seg[6].size() - 4);
+  auto number = [](const std::string& s, const char* what)
+  {
+    std::uint64_t n = 0;
+    const auto r = std::from_chars(s.data(), s.data() + s.size(), n);
+    if (
+      s.empty() || r.ec != std::errc() || r.ptr != s.data() + s.size() ||
+      n > 0xffffffffu)
+    {
+      throw HttpError(400, "bad_request", std::string("bad ") + what);
+    }
+    return static_cast<std::uint32_t>(n);
+  };
+  TileRequest tr;
+  tr.model = seg[0];
+  try
+  {
+    tr.field = FieldSpec::parse(seg[1]);
+  }
+  catch (const std::invalid_argument& e)
+  {
+    throw HttpError(400, "bad_request", e.what());
+  }
+  if (tr.field.level != FieldSpec::Level::fixed)
+  {
+    throw HttpError(400, "bad_request", "tile fields need an explicit @level");
+  }
+  if (seg[2].size() != 10)
+  {
+    throw HttpError(400, "bad_request", "run must be YYYYmmddHH");
+  }
+  try
+  {
+    tr.run_s = parse_iso8601(
+      seg[2].substr(0, 4) + "-" + seg[2].substr(4, 2) + "-" +
+      seg[2].substr(6, 2) + "T" + seg[2].substr(8, 2) + ":00Z");
+  }
+  catch (const std::invalid_argument&)
+  {
+    throw HttpError(400, "bad_request", "run must be YYYYmmddHH");
+  }
+  tr.fhr = number(seg[3], "fhr");
+  tr.z = number(seg[4], "z");
+  tr.x = number(seg[5], "x");
+  tr.y = number(seg[6], "y");
+  if (tr.z > 24 || tr.x >= (1u << tr.z) || tr.y >= (1u << tr.z))
+  {
+    throw HttpError(400, "bad_request", "bad z/x/y");
+  }
+  const auto models = v.store->models();
+  if (!std::binary_search(models.begin(), models.end(), tr.model))
+  {
+    throw HttpError(404, "not_found", "unknown model \"" + tr.model + "\"");
+  }
+  if (!q.count("cmap"))
+  {
+    throw HttpError(400, "bad_request", "missing cmap");
+  }
+  Colormap cmap;
+  try
+  {
+    cmap = Colormap::parse(
+      q.at("cmap"), q.count("nodata")
+                      ? std::optional<std::string_view>(q.at("nodata"))
+                      : std::nullopt);
+  }
+  catch (const std::invalid_argument& e)
+  {
+    throw HttpError(400, "bad_request", e.what());
+  }
+  const TileResult res = render_tile(*v.store, tr, cmap);
+  if (res.status == TileResult::Status::no_time)
+  {
+    throw HttpError(404, "no_time", "no data for that run and hour");
+  }
+  if (res.status == TileResult::Status::no_field)
+  {
+    throw HttpError(404, "no_field", "field not stored at that time");
+  }
+  fcgi::Response r;
+  r.content_type = "image/png";
+  const std::string etag =
+    "\"" + key_hex(fnv1a64(res.png.data(), res.png.size())) + "\"";
+  r.headers.push_back({"X-Atmo-Snapshot", std::to_string(v.snap->seq())});
+  // A (run, fhr) never changes once published, so neither does the tile.
+  r.headers.push_back({"Cache-Control", "public, max-age=31536000, immutable"});
+  r.headers.push_back({"ETag", etag});
+  if (req.param("HTTP_IF_NONE_MATCH") == etag)
+  {
+    r.status = 304;
+    return r;
+  }
+  if (req.param("REQUEST_METHOD", "GET") != "HEAD")
+  {
+    r.body = res.png;
+  }
+  return r;
 }
 
 // ---------------------------------------------------------------------------

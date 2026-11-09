@@ -1,5 +1,6 @@
 // HTTP API of the query daemon (T10; 04-query-api.md): routes FastCGI
-// requests to /healthz, /v1/meta and /v1/point over the current snapshot or
+// requests to /healthz, /v1/meta, /v1/point and /v1/tiles (PNG, T10b) over
+// the current snapshot or
 // one pinned with ?snapshot=<seq>, plus the CURRENT watcher.
 //
 // Every JSON response carries X-Atmo-Snapshot.  Errors are
@@ -59,6 +60,11 @@ class QueryApi
   };
   // Current snapshot (nullptr snap if none yet), or the pinned one.
   View view(std::uint64_t pinned_seq) const;
+  fcgi::Response tile(
+    const std::string& path,
+    const std::map<std::string, std::string>& q,
+    const fcgi::Request& req,
+    const View& v) const;
 
   std::filesystem::path root_;
   SnapshotLoader& loader_;

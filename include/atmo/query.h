@@ -72,6 +72,30 @@ struct ModelTime
   bool operator==(const ModelTime&) const = default;
 };
 
+// One field at one time, for bulk access (tiles): values by grid point.
+// Immutable; holds whatever it needs (a decoded GRIB message, a mapped
+// field file) for as long as it lives.
+class FieldView
+{
+ public:
+  virtual ~FieldView();
+  // Value at grid point (i, j) of the view's grid; NaN = missing.
+  virtual double at(std::uint32_t i, std::uint32_t j) const = 0;
+  const Grid& grid() const { return *grid_; }
+  const FieldInfo& info() const { return info_; }
+
+  // Bilinear inside `cell` (the corner i+1 wraps on periodic grids); NaN
+  // if a corner is missing or the cell does not exist.
+  double sample(const Grid::Cell& cell) const;
+
+ protected:
+  FieldView(std::shared_ptr<const Grid> grid, FieldInfo info);
+
+ private:
+  std::shared_ptr<const Grid> grid_;
+  FieldInfo info_;
+};
+
 // Read access to gridded fields.  Implementations are immutable and
 // thread-safe.
 class FieldStore
@@ -96,6 +120,12 @@ class FieldStore
     const ModelTime& t,
     const FieldKey& key,
     const Grid::Cell& cell) const = 0;
+  // The whole field for bulk access; nullptr if absent (or not decodable
+  // here, e.g. GRIB without a cache).  May decode (GRIB).
+  virtual std::shared_ptr<const FieldView> view(
+    std::string_view model,
+    const ModelTime& t,
+    const FieldKey& key) const = 0;
 };
 
 // FieldStore over a snapshot: T7 field files and GRIB-native files
@@ -123,6 +153,10 @@ class SnapshotFieldStore : public FieldStore
     const ModelTime& t,
     const FieldKey& key,
     const Grid::Cell& cell) const override;
+  std::shared_ptr<const FieldView> view(
+    std::string_view model,
+    const ModelTime& t,
+    const FieldKey& key) const override;
 
  private:
   std::shared_ptr<const FieldFile> file(
@@ -222,6 +256,9 @@ PointResult point(
   const PointQuery& q);
 
 const char* to_string(PointValue::Status s);
+// Rotation of the grid's +i axis at a cell (bilinear in sin/cos, so a wrap
+// at +-pi cannot spoil it).
+double grid_alpha_at(const Grid& g, const Grid::Cell& c);
 // "2026-11-08T18:00:00Z"
 std::string iso8601(std::int64_t t_s);
 // Parses "2026-11-08T18:00:00Z" (seconds and Z optional: "2026-11-08T18:00").
