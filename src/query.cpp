@@ -75,8 +75,6 @@ struct TimeSlice
   std::vector<FieldInfo> fields;
 };
 
-// Rotation of the grid's +i axis at the point (bilinear in sin/cos so a
-// wrap at +-pi cannot spoil it).
 double alpha_at(const Grid& g, const Grid::Cell& c)
 {
   const std::uint32_t i1 = c.i + 1 == g.ni() ? 0 : c.i + 1;
@@ -340,6 +338,68 @@ std::int64_t ModelTime::valid_s() const
 
 FieldStore::~FieldStore() = default;
 
+FieldView::FieldView(std::shared_ptr<const Grid> grid, FieldInfo info)
+    : grid_(std::move(grid)), info_(info)
+{
+}
+
+FieldView::~FieldView() = default;
+
+double FieldView::sample(const Grid::Cell& c) const
+{
+  const Grid& g = *grid_;
+  if (c.j + 1 >= g.nj() || (g.periodic_i() ? c.i >= g.ni() : c.i + 1 >= g.ni()))
+  {
+    return kNaN;
+  }
+  const std::uint32_t i1 = c.i + 1 == g.ni() ? 0 : c.i + 1;
+  const double v00 = at(c.i, c.j), v10 = at(i1, c.j);
+  const double v01 = at(c.i, c.j + 1), v11 = at(i1, c.j + 1);
+  return (1.0 - c.fy) * ((1.0 - c.fx) * v00 + c.fx * v10) +
+         c.fy * ((1.0 - c.fx) * v01 + c.fx * v11);
+}
+
+namespace
+{
+
+class FieldFileView : public FieldView
+{
+ public:
+  FieldFileView(
+    std::shared_ptr<const Grid> g,
+    std::shared_ptr<const FieldFile> f,
+    std::size_t k)
+      : FieldView(std::move(g), f->field(k)), file_(std::move(f)), k_(k)
+  {
+  }
+  double at(std::uint32_t i, std::uint32_t j) const override
+  {
+    return file_->value(k_, i, j);
+  }
+
+ private:
+  std::shared_ptr<const FieldFile> file_;
+  std::size_t k_;
+};
+
+class GribView : public FieldView
+{
+ public:
+  GribView(std::shared_ptr<const GribMessageData> d, FieldInfo info)
+      : FieldView(d->grid, info), data_(std::move(d))
+  {
+  }
+  double at(std::uint32_t i, std::uint32_t j) const override
+  {
+    return data_->values[static_cast<std::size_t>(j) * grid().ni() + i];
+  }
+
+ private:
+  std::shared_ptr<const GribMessageData> data_;
+};
+
+}  // namespace
+
 SnapshotFieldStore::SnapshotFieldStore(
   std::shared_ptr<const Snapshot> s,
   GribCache* cache)
@@ -517,6 +577,46 @@ float SnapshotFieldStore::sample(
       cell.fy * ((1.0 - cell.fx) * v01 + cell.fx * v11));
   }
   return nan;
+}
+
+std::shared_ptr<const FieldView> SnapshotFieldStore::view(
+  std::string_view model,
+  const ModelTime& t,
+  const FieldKey& key) const
+{
+  if (auto f = file(model, t))
+  {
+    auto k = f->find(key.param_id, key.level_type, key.level_value);
+    auto g = snap_->grid(f->grid_key());
+    if (!k || !g)
+    {
+      return nullptr;
+    }
+    return std::make_shared<FieldFileView>(std::move(g), f, *k);
+  }
+  const GribSlice* sl = grib_slice(model, t);
+  if (!sl || !cache_)
+  {
+    return nullptr;
+  }
+  FieldInfo want;
+  want.param_id = key.param_id;
+  want.level_type = key.level_type;
+  want.level_value = key.level_value;
+  for (const auto& m : sl->msgs)
+  {
+    if (m.entry->info.same_field(want))
+    {
+      auto g = snap_->grid(sl->grid);
+      if (!g)
+      {
+        return nullptr;
+      }
+      return std::make_shared<GribView>(
+        cache_->get(*m.file, *m.entry, g), m.entry->info);
+    }
+  }
+  return nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -710,7 +810,8 @@ PointResult point(
           const double u = spec.var->code == var::kWindU ? v : o;
           const double vv = spec.var->code == var::kWindU ? o : v;
           double east = 0.0, north = 0.0;
-          rotate_to_earth(alpha_at(*ts.grid, *ts.cell), u, vv, east, north);
+          rotate_to_earth(
+            grid_alpha_at(*ts.grid, *ts.cell), u, vv, east, north);
           v = spec.var->code == var::kWindU ? east : north;
         }
         value += picks[k].second * v;
@@ -739,6 +840,11 @@ PointResult point(
     }
   }
   return r;
+}
+
+double grid_alpha_at(const Grid& g, const Grid::Cell& c)
+{
+  return alpha_at(g, c);
 }
 
 // ---------------------------------------------------------------------------

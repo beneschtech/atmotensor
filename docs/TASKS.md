@@ -99,8 +99,11 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       missing libeccodes_f90.so.0), so the config package is probed in a
       sub-configure (cmake/eccodes_probe) and pkg-config is used there.
       Message selection policy: Q9.
-- [ ] T10b PNG map tiles + colormaps (Q12): /v1/tiles and /v1/colormaps per
-      docs/api/query-api-v1.md; colormap export format first (with Chris).
+- [x] T10b PNG map tiles + colormaps (Q12): /v1/tiles per
+      docs/api/query-api-v1.md; colormaps travel in the request (Q12).
+      Done: `colormap.h`, `png.h` (zlib optional), `tiles.h` (lattice
+      locate + block interpolation, seam/edge fallbacks), FieldStore::view,
+      route with ETag/304. GFS 0.25: ~6 ms per warm tile.
 - [x] T10c GRIB-native gridded store (Q10): index of messages in the
       original GRIB2 files + decoded-message cache (Chris's design in Q10);
       implements FieldStore so T9/T10 need no change. Design review first.

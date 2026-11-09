@@ -170,6 +170,41 @@ class FakeStore : public FieldStore
     return NAN;
   }
 
+  // Bulk view over the stored values.
+  class View : public FieldView
+  {
+   public:
+    View(
+      std::shared_ptr<const Grid> g,
+      FieldInfo fi,
+      const std::vector<float>* v)
+        : FieldView(std::move(g), fi), v_(v)
+    {
+    }
+    double at(std::uint32_t i, std::uint32_t j) const override
+    {
+      return (*v_)[grid().index(i, j)];
+    }
+
+   private:
+    const std::vector<float>* v_;
+  };
+  std::shared_ptr<const FieldView> view(
+    std::string_view model,
+    const ModelTime& t,
+    const FieldKey& k) const override
+  {
+    const Slice* s = find(model, t);
+    if (!s)
+      return nullptr;
+    for (const auto& [info, v] : s->fields)
+      if (
+        info.param_id == k.param_id && info.level_type == k.level_type &&
+        info.level_value == k.level_value)
+        return std::make_shared<View>(s->grid, info, &v);
+    return nullptr;
+  }
+
  private:
   const Slice* find(std::string_view model, const ModelTime& t) const
   {

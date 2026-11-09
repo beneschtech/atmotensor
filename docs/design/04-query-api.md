@@ -2,7 +2,8 @@
 
 > The client-facing contract (what is Stable vs Draft, exact parameters and
 > response shapes) is `docs/api/query-api-v1.md`. Tiles are PNG with
-> server-side colormaps (Q12), replacing the float32 tile sketch below.
+> server-side colormaps passed in each request (Q12, T10b), replacing the
+> float32 tile sketch below.
 
 Principles
 - The query daemon is a FastCGI responder behind nginx (decision D8). nginx

@@ -28,7 +28,7 @@ CMake only (CLion); presets in CMakePresets.json: default, asan, ci.
     cmake --preset asan && cmake --build --preset asan -j && ctest --preset asan
     ./build-cmake/bench_kdtree; ./build-cmake/bench_grid
     # options: ATMO_SANITIZE ATMO_WERROR ATMO_BUILD_TESTS ATMO_BUILD_BENCH
-    #          ATMO_WITH_ECCODES=AUTO|ON|OFF, ECCODES_ROOT=/prefix
+    #          ATMO_WITH_ECCODES=AUTO|ON|OFF, ECCODES_ROOT=/prefix, ATMO_WITH_ZLIB
     ./build-cmake/atmo_grib_ingest --root DIR --model gfs [--seed-sources] [--tiles] F.grib2
     ./build-cmake/atmo_queryd --root DIR --socket /run/atmo/query.sock  # behind nginx
     # deploy: deploy/README.md (nginx snippet + systemd unit); API contract: docs/api/query-api-v1.md
@@ -85,6 +85,11 @@ and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
   grid, LRU purge by byte budget and /proc RSS, shared_ptr = in use,
   coalesced decodes), process_rss(); ingest/decoder in grib.h
   (index_grib, grib_decoder). Default ingest path; T7 tiles via --tiles.
+- `include/atmo/tiles.h` PNG map tiles (T10b): render_tile/tile_values over
+  FieldStore::view (lattice locate every 16 px + interpolation, per-pixel
+  fallback at grid edges and the periodic seam); `colormap.h` (request
+  `cmap` syntax, clamp to end colours, nodata); `png.h` (RGBA writer,
+  zlib if found, else stored blocks)
 - `include/atmo/crc32.h`    CRC-32 (zlib-compatible)
 - `include/atmo/source.h`   SourceClass (metric per source class),
   SourceRegistry (JSON config)
