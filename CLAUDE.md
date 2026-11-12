@@ -29,7 +29,14 @@ CMake only (CLion); presets in CMakePresets.json: default, asan, ci.
     ./build-cmake/bench_kdtree; ./build-cmake/bench_grid
     # options: ATMO_SANITIZE ATMO_WERROR ATMO_BUILD_TESTS ATMO_BUILD_BENCH
     #          ATMO_WITH_ECCODES=AUTO|ON|OFF, ECCODES_ROOT=/prefix, ATMO_WITH_ZLIB
-    ./build-cmake/atmo_grib_ingest --root DIR --model gfs [--seed-sources] [--tiles] F.grib2
+    #          ATMO_WITH_MYSQL=AUTO|ON|OFF (grid catalog: libmysqlclient
+    #          or libmariadb via pkg-config; server is MySQL 8.0.19+)
+    tests/catalog_testdb.sh start   # throwaway mysqld + web migrations
+    ./build-cmake/atmo_grib_ingest --root DIR --model gfs --catalog CONFIG F.grib2
+    ./build-cmake/atmo_grib_ingest --catalog CONFIG --realias   # after alias edits
+    ./build-cmake/atmo_grib_ingest --catalog CONFIG --root DIR --expire [--keep K]
+    ./build-cmake/atmo_grib_ingest --root DIR --seed-sources   # first manifest
+    ./build-cmake/atmo_grib_ingest --root DIR --model gfs --tiles F.grib2  # T7
     ./build-cmake/atmo_queryd --root DIR --socket /run/atmo/query.sock  # behind nginx
     # deploy: deploy/README.md (nginx snippet + systemd unit); API contract: docs/api/query-api-v1.md
 
@@ -40,8 +47,14 @@ Run the asan preset after touching anything with pointers or file I/O.
 
 ## Web app
 
-`../web` (Symfony 7.4) owns MySQL and its schema (Doctrine migrations). The
-engine never connects to MySQL: the web app exports reference data
+`../web` (Symfony 7.4) owns MySQL and its schema (Doctrine migrations).
+Grids (D13, 2026-11-11, `docs/design/07-grib-catalog.md`): the engine
+reads and writes the `grib_*` catalog tables directly; every GRIB message
+is catalogued (T14-T18 done, web UI T19 pending); it replaced the T10c
+idx.json sidecars / manifest `gribs` / registry-gated ingest (removed in
+T18; the manifest is format version 2, version 1 still read).
+Everything else: the engine does not use MySQL; the web app exports
+reference data
 (source classes, stations, ...) as JSON files into `/opt/atmotensor/data/config/`,
 and ingest publishes them through the manifest. Contract:
 `docs/design/05-reference-data.md` (D10).
@@ -77,19 +90,49 @@ and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
   `name@level`, time/log-p/altitude interpolation, wind rotation, JSON
 - `include/atmo/fcgi.h` in-house FastCGI responder: Connection (protocol
   state machine, no I/O), Server (poll I/O thread + worker pool, 503/504)
+- `tests/fake_catalog.h` in-memory CatalogQuery over one CatalogFile
+  (tests of GribApi / CatalogFieldStore without MySQL)
 - `include/atmo/http_api.h` QueryApi (/healthz, /v1/meta, /v1/point,
   ?snapshot= pinning), SnapshotWatcher (inotify + poll); daemon in
   `tools/atmo_queryd.cpp`
-- `include/atmo/gribstore.h` GRIB-native store (Q10, T10c): GribIndex
-  (sidecar <file>.idx.json), GribCache (hash -> decoded doubles + shared
-  grid, LRU purge by byte budget and /proc RSS, shared_ptr = in use,
-  coalesced decodes), process_rss(); ingest/decoder in grib.h
-  (index_grib, grib_decoder). Default ingest path; T7 tiles via --tiles.
+- `include/atmo/gribstore.h` GribCache (Q10, T10c; hash -> decoded
+  doubles + shared grid, LRU purge by byte budget and /proc RSS,
+  shared_ptr = in use, coalesced decodes), GribIndexEntry (a decode
+  request), process_rss(); decoder in grib.h (grib_decoder). GRIB files
+  are listed by the grid catalog only (sidecars removed in T18)
 - `include/atmo/tiles.h` PNG map tiles (T10b): render_tile/tile_values over
   FieldStore::view (lattice locate every 16 px + interpolation, per-pixel
   fallback at grid edges and the periodic seam); `colormap.h` (request
   `cmap` syntax, clamp to end colours, nodata); `png.h` (RGBA writer,
   zlib if found, else stored blocks)
+- `include/atmo/gribsig.h` (eccodes) GRIB2 parameter signatures (D13,
+  T15): describe_grib() -> GribHeader (signature canonical text + FNV
+  hash/base_hash, stat interval + process, member, levels SI, offsets s,
+  level-independent table 4.2 name/units for default names, Q17b), versioned
+  deny list as data, raw fallback for undecodable templates,
+  grib_message_spans(); `tools/atmo_grib_sigcheck` validates the deny list
+  on real files (results in QUESTIONS.md Q13)
+- `include/atmo/catalog.h` grid catalog (D13, T16): CatalogFile/Grid/
+  Message rows (filled by catalog_grib() in grib.h), CatalogConfig (JSON,
+  mode 600), catalog_api_name() (default model+grid API name), schema
+  version 2 (web migration Version20261111180000: model aliases, common
+  names, api_name, viewable, message process_id; version 3: replaced
+  message ids -> 410 replaced_by, Q16b), Catalog writer
+  (ingest, realias() for model aliases) = `atmo_catalog` lib (src/catalog_mysql.cpp,
+  MySQL C API, only with ATMO_WITH_MYSQL + eccodes). Tests need a
+  throwaway DB: `tests/catalog_testdb.sh start` prints ATMO_TEST_CATALOG
+  (test_catalog exits 77 = skipped without it)
+- `include/atmo/grib_api.h` /v1/grib/* (T17): GribApi over the abstract
+  CatalogQuery (core, no MySQL; tests fake it in memory), CatalogTables
+  (small tables of one generation); by-id point/tiles decode through
+  GribCache with GribIndexEntry info.param_id = kNativeParam (native
+  units). MySQL implementation: CatalogReader in catalog.h;
+  `atmo_queryd --catalog CONFIG`. CatalogFieldStore (T17c): /v1/point,
+  /v1/tiles, /v1/meta over the catalog (models = api_name, fields =
+  common names / normalised parameter names, Q19/Q20 best-guess
+  matching); FieldStore::resolve_field/resolve_model/param(id) +
+  ParamRole replace registry codes in query.cpp/tiles.cpp (the base
+  class keeps the registry behaviour for snapshot stores)
 - `include/atmo/crc32.h`    CRC-32 (zlib-compatible)
 - `include/atmo/source.h`   SourceClass (metric per source class),
   SourceRegistry (JSON config)
@@ -107,7 +150,9 @@ and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
   -> rename protocol, keeps last M, cleans up crashed publishes),
   read_current_manifest()
 - `include/atmo/retention.h` apply_retention(): obs buckets by
-  retain_seconds, newest K runs per model, unused grids; the publisher's
+  retain_seconds, newest K runs per model (field files); grids never
+  expire and gc never touches grids/ or grib/ (shared with the grid
+  catalog, whose retention is Catalog::expire(), T18); the publisher's
   `retired` list + collect_garbage() unlink after the grace period
 - `include/atmo/snapshot.h` Snapshot (every file of one manifest opened up
   front and checked against its entry, ObsIndex), SnapshotLoader

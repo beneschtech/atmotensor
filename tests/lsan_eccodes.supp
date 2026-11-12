@@ -1,0 +1,6 @@
+# LeakSanitizer suppressions for the gribsig test only (CMakeLists.txt).
+# eccodes 2.45 leaks accessors inside grib_handle_new_from_message when a
+# message uses a product template it has no definition for ("Unable to find
+# template"): it still returns a handle, and codes_handle_delete does not
+# free what the failed template load allocated.  Our handle is RAII-deleted.
+leak:grib_handle_new_from_message

@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include "atmo/crc32.h"
 #include "atmo/gribstore.h"
 #include "atmo/manifest.h"
 #include "atmo/retention.h"
@@ -116,45 +117,6 @@ std::size_t entry_bytes(std::size_t n)
 }  // namespace
 
 // ---------------------------------------------------------------------------
-
-TEST(grib_index_round_trip_and_validation)
-{
-  GribIndex x;
-  x.model = "hrrr";
-  x.run_s = 1762300800;
-  x.grib = "grib/hrrr/2025110500/hrrr.t00z.wrfsfcf00.grib2";
-  x.size = 100000;
-  x.messages_total = 4;
-  x.entries = {entry(1, 0), entry(2, 0, var::kWindU, 10.0f), entry(3, 1)};
-  x.entries[1].info.flags = kFieldGridRelative;
-  x.entries[2].hash = 0xffffffffffffffffULL;
-  x.skipped = {{3, "parameter 0.16.196 not in the variable registry"}};
-  x.validate();
-  CHECK(GribIndex::from_text(x.to_text()) == x);
-
-  auto rejects = [&](auto mutate)
-  {
-    GribIndex y = x;
-    mutate(y);
-    return throws<std::invalid_argument>([&] { y.validate(); });
-  };
-  CHECK(rejects([](GribIndex& y) { y.model = "HRRR"; }));
-  CHECK(rejects([](GribIndex& y) { y.entries[0].offset = 99990; }));
-  CHECK(rejects([](GribIndex& y) { y.entries[0].length = 0; }));
-  CHECK(rejects([](GribIndex& y) { y.entries.push_back(y.entries[0]); }));
-  CHECK(rejects([](GribIndex& y) { y.entries[1].grid = 0xdef; }));
-  CHECK(!rejects([](GribIndex& y) { y.entries[2].grid = 0xdef; }));  // fhr 1
-
-  auto j = x.to_json();
-  j["messages"][0]["extra"] = 1;
-  CHECK(throws<std::invalid_argument>([&] { GribIndex::from_json(j); }));
-  j = x.to_json();
-  j["messages"][0]["hash"] = "XYZ";
-  CHECK(throws<std::invalid_argument>([&] { GribIndex::from_json(j); }));
-  j = x.to_json();
-  j["format"] = "atmo-manifest";
-  CHECK(throws<std::invalid_argument>([&] { GribIndex::from_json(j); }));
-}
 
 TEST(grib_cache_hits_lru_and_in_use)
 {
@@ -285,78 +247,76 @@ TEST(grib_cache_rss_trigger_and_forced_cleanup)
   CHECK(process_rss() > 1000000);  // the real one reads /proc
 }
 
-TEST(manifest_gribs_retention_and_gc)
+TEST(manifest_version_1_with_gribs_is_still_read)
 {
+  // A T10c manifest (version 1, "gribs"): read as version 2; only the
+  // .idx.json sidecars are retired, the GRIB files are left to the grid
+  // catalog (T18).
+  Manifest base;
+  base.sources = SourceRegistry::defaults();
+  base.seq = 7;
+  base.created_at_s = 1762300800;
+  base.grids = {GridEntry{0xabc, "grids/0000000000000abc.grid", 1}};
+  nlohmann::json j = base.to_json();
+  CHECK(j["version"] == 2 && !j.contains("gribs"));
+  j["version"] = 1;
+  j["gribs"] = nlohmann::json::array(
+    {{{"model", "hrrr"},
+      {"run", 1762300800},
+      {"path", "grib/hrrr/2025110500/a.grib2"},
+      {"index_path", "grib/hrrr/2025110500/a.grib2.idx.json"},
+      {"index_crc", 1},
+      {"size", 10},
+      {"grids", {"0000000000000abc"}}}});
+  const Manifest m = Manifest::from_json(j);
+  CHECK(m.retired.size() == 1);
+  CHECK(
+    m.retired.size() == 1 &&
+    m.retired[0].path == "grib/hrrr/2025110500/a.grib2.idx.json" &&
+    m.retired[0].retired_at_s == base.created_at_s);
+  for (const auto& p : m.live_paths())
+  {
+    CHECK(p.rfind("grib/", 0) != 0);
+  }
+  CHECK(m.grids == base.grids);
+  const nlohmann::json out = m.to_json();
+  CHECK(out["version"] == 2 && !out.contains("gribs"));
+  CHECK(Manifest::from_json(out) == m);
+  // Version 2 does not take "gribs"; other versions are refused.
+  nlohmann::json bad = out;
+  bad["gribs"] = nlohmann::json::array();
+  CHECK(throws<std::invalid_argument>([&] { Manifest::from_json(bad); }));
+  bad = out;
+  bad["version"] = 3;
+  CHECK(throws<std::invalid_argument>([&] { Manifest::from_json(bad); }));
+
+  // Published from disk: the sidecar is unlinked after the grace period,
+  // the GRIB file stays.
   TempDir td;
-  const std::int64_t run0 = 1762300800, h = 3600;
-  Manifest m;
-  m.sources = SourceRegistry::defaults();
-  m.grids = {
-    GridEntry{0xabc, "grids/0000000000000abc.grid", 1},
-    GridEntry{0xdef, "grids/0000000000000def.grid", 2}};
-  for (int k = 0; k < 6; ++k)
-  {
-    GribEntry g;
-    g.model = "hrrr";
-    g.run_s = run0 + k * h;
-    g.path = "grib/hrrr/run" + std::to_string(k) + "/f.grib2";
-    g.index_path = g.path + ".idx.json";
-    g.index_crc = static_cast<std::uint32_t>(k);
-    g.size = 1000;
-    g.grids = {k < 2 ? GridKey{0xdef} : GridKey{0xabc}};
-    m.gribs.push_back(g);
-  }
-  m.validate();
-  CHECK(Manifest::from_text(m.to_text()) == m);
-  CHECK(m.live_paths().size() == 2 + 12);  // grids + GRIB files + indexes
-
-  auto rejects = [&](auto mutate)
-  {
-    Manifest x = m;
-    mutate(x);
-    return throws<std::invalid_argument>([&] { x.validate(); });
-  };
-  CHECK(rejects([](Manifest& x) { x.gribs[0].index_path = "grib/hrrr/x"; }));
-  CHECK(rejects([](Manifest& x) { x.gribs[0].path = "fields/hrrr/a"; }));
-  CHECK(rejects([](Manifest& x) { x.gribs[0].grids = {0x123}; }));
-  CHECK(rejects([](Manifest& x) { x.gribs[0].grids.clear(); }));
-  CHECK(rejects([](Manifest& x) { x.gribs.push_back(x.gribs[0]); }));
-
-  // Newest 4 runs stay; the grid only the two oldest used expires.
-  const RetentionResult r = apply_retention(m, run0 + 10 * h, {});
-  CHECK(r.manifest.gribs.size() == 4);
-  CHECK(r.manifest.gribs.front().run_s == run0 + 2 * h);
-  CHECK(r.grids_expired == 1);
-  CHECK(r.manifest.grids.size() == 1 && r.manifest.grids[0].key == 0xabc);
-
-  // Publish real files, expire, and gc unlinks GRIB file + index.
-  ManifestPublisher pub(td.p);
-  std::int64_t clock = 1000000;
-  pub.set_clock([&] { return clock; });
-  Manifest real;
-  real.sources = SourceRegistry::defaults();
-  real.grids = {GridEntry{0xabc, "grids/0000000000000abc.grid", 1}};
-  std::ofstream(td.p / "grid.tmp") << "x";
+  fs::create_directories(td.p / "manifest");
+  fs::create_directories(td.p / "grib/hrrr/2025110500");
   fs::create_directories(td.p / "grids");
-  fs::rename(td.p / "grid.tmp", td.p / real.grids[0].path);
-  for (int k = 0; k < 5; ++k)
+  std::ofstream(td.p / "grib/hrrr/2025110500/a.grib2") << "GRIB";
+  std::ofstream(td.p / "grib/hrrr/2025110500/a.grib2.idx.json") << "{}";
+  std::ofstream(td.p / "grids/0000000000000abc.grid") << "g";
   {
-    GribEntry g = m.gribs[static_cast<std::size_t>(k + 1)];
-    g.grids = {0xabc};
-    fs::create_directories((td.p / g.path).parent_path());
-    std::ofstream(td.p / g.path) << "GRIB";
-    std::ofstream(td.p / g.index_path) << "{}";
-    real.gribs.push_back(g);
+    // CURRENT names MANIFEST-...7 with the CRC of its bytes.
+    const std::string text = j.dump(1) + "\n";
+    std::ofstream(td.p / "manifest" / Manifest::file_name(7)) << text;
+    char cur[64];
+    std::snprintf(
+      cur, sizeof cur, "atmo-current 1 7 %08x\n",
+      static_cast<unsigned>(crc32(text.data(), text.size())));
+    std::ofstream(td.p / "manifest/CURRENT") << cur;
   }
-  pub.publish(real);
-  pub.publish(apply_retention(pub.current(), clock, {}).manifest);
-  CHECK(pub.current().gribs.size() == 4);
-  CHECK(pub.current().retired.size() == 2);  // GRIB file + its index
-  clock += 700;
+  ManifestPublisher pub(td.p);
+  CHECK(pub.current().seq == 7 && pub.current().retired.size() == 1);
+  pub.set_clock([] { return 1762300800 + 100000; });
   const GcReport g = pub.collect_garbage(600);
-  CHECK(g.retired_unlinked == 2);
-  CHECK(!fs::exists(td.p / "grib/hrrr/run1"));  // emptied directory removed
-  CHECK(fs::exists(td.p / "grib/hrrr/run2/f.grib2"));
+  CHECK(g.retired_unlinked == 1);
+  CHECK(!fs::exists(td.p / "grib/hrrr/2025110500/a.grib2.idx.json"));
+  CHECK(fs::exists(td.p / "grib/hrrr/2025110500/a.grib2"));
+  CHECK(fs::exists(td.p / "grids/0000000000000abc.grid"));
 }
 
 int main()

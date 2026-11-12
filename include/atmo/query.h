@@ -5,7 +5,9 @@
 // fields are stored: SnapshotFieldStore serves T7 field files, and a
 // GRIB-native store (Q10) can implement the same interface.
 //
-// Field specs: "name[@level]" with name from the variable registry and
+// Field specs: "name[@level]", the name resolved by the FieldStore (the
+// variable registry by default; the grid catalog's common / parameter
+// names with best-guess matching for CatalogFieldStore, Q19/Q20), and
 //   @sfc        ground or water surface       (GRIB2 level type 1)
 //   @msl        mean sea level                (101)
 //   @<x>m       x metres above ground         (103), e.g. @2m, @10m
@@ -30,6 +32,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -53,6 +56,53 @@ constexpr std::uint8_t kLevelSurface = 1;
 constexpr std::uint8_t kLevelIsobaric = 100;
 constexpr std::uint8_t kLevelMsl = 101;
 constexpr std::uint8_t kLevelHeightAgl = 103;
+
+// What point() and the tiles need to know about a parameter beyond its
+// values: the u/v pair for rotation and geopotential height for altitude.
+enum class ParamRole
+{
+  other,
+  wind_u,
+  wind_v,
+  geopotential_height,
+};
+
+struct ParamInfo
+{
+  std::string name;  // field name as specs and responses spell it
+  std::string units;
+  ParamRole role = ParamRole::other;
+};
+
+// A model or field name that cannot be used (Q20): HTTP status and error
+// code for the API layer; `candidates` for ambiguous_name.
+class NameError : public std::invalid_argument
+{
+ public:
+  NameError(
+    int status,
+    std::string code,
+    const std::string& message,
+    std::vector<std::string> candidates = {});
+  int status;
+  std::string code;
+  std::vector<std::string> candidates;
+};
+
+// A best guess (Q20b): `asked` matched exactly one name partially.
+struct NameWarning
+{
+  std::string argument;  // "models", "fields", "model", "field"
+  std::string asked;
+  std::string used;
+};
+
+struct ResolvedName
+{
+  std::string name;         // canonical
+  std::uint16_t param = 0;  // fields: the store's parameter id
+  bool guess = false;
+};
 
 struct FieldKey
 {
@@ -126,20 +176,21 @@ class FieldStore
     std::string_view model,
     const ModelTime& t,
     const FieldKey& key) const = 0;
+
+  // Names.  The defaults use the variable registry (param id = variable
+  // code) and exact model names; NameError(400, "bad_request") for
+  // unknown ones.
+  virtual ParamInfo param(std::uint16_t id) const;
+  virtual ResolvedName resolve_field(std::string_view name) const;
+  virtual ResolvedName resolve_model(std::string_view name) const;
 };
 
-// FieldStore over a snapshot: T7 field files and GRIB-native files
-// (T10c).  GRIB messages are decoded on demand through `cache`; without a
-// cache they are listed but sample to NaN.  Several GRIB files may serve
-// one (model, run, fhr) (e.g. HRRR wrfsfc + wrfprs): their messages are
-// merged, the first listed wins on duplicates, messages on a grid other
-// than the first one's are ignored.
+// FieldStore over a snapshot's T7 field files (atmo_grib_ingest --tiles).
+// GRIB files are served by CatalogFieldStore (grib_api.h) since T18.
 class SnapshotFieldStore : public FieldStore
 {
  public:
-  explicit SnapshotFieldStore(
-    std::shared_ptr<const Snapshot> snapshot,
-    GribCache* cache = nullptr);
+  explicit SnapshotFieldStore(std::shared_ptr<const Snapshot> snapshot);
   ~SnapshotFieldStore() override;
 
   std::vector<std::string> models() const override;
@@ -163,24 +214,8 @@ class SnapshotFieldStore : public FieldStore
     std::string_view model,
     const ModelTime& t) const;
 
-  struct GribMsg
-  {
-    const std::filesystem::path* file;
-    const GribIndexEntry* entry;
-  };
-  struct GribSlice
-  {
-    GridKey grid = 0;
-    std::vector<GribMsg> msgs;
-  };
-  const GribSlice* grib_slice(std::string_view model, const ModelTime& t) const;
-
   std::shared_ptr<const Snapshot> snap_;
-  GribCache* cache_ = nullptr;
   std::vector<std::pair<std::string, std::vector<ModelTime>>> times_;
-  std::vector<std::filesystem::path> grib_files_;  // absolute
-  std::map<std::tuple<std::string, std::int64_t, std::uint32_t>, GribSlice>
-    gribs_;
 };
 
 struct FieldSpec
@@ -192,15 +227,29 @@ struct FieldSpec
   };
 
   std::string text;  // canonical form, e.g. "air_temperature@2m"
+  std::string name;  // the name part as given
+  // The registry's entry if it knows `name` (else nullptr): set by parse.
   const VariableInfo* var = nullptr;
+  // The store's parameter id: set by resolve() (point() and the tiles
+  // resolve specs that are not resolved yet).
+  std::uint16_t param = 0;
   Level level = Level::query;
   std::uint8_t level_type = 0;
   float level_value = 0.0f;  // SI
 
-  // std::invalid_argument for unknown variables or malformed levels.
+  // Syntax only: std::invalid_argument for a malformed name or level.
   static FieldSpec parse(std::string_view text);
-  // Canonical spec of a stored field ("name@level").
+  // Resolves the name through `store` (NameError if it cannot); sets
+  // `param` and the canonical `text`; a best guess is appended to
+  // `warnings` (if given) as argument `argument`.
+  void resolve(
+    const FieldStore& store,
+    std::vector<NameWarning>* warnings,
+    const std::string& argument = "fields");
+  // Canonical spec of a stored field ("name@level"); the name from the
+  // registry, or from `store` if given.
   static std::string format(const FieldInfo& f);
+  static std::string format(const FieldInfo& f, const FieldStore& store);
 };
 
 struct PointQuery
@@ -223,16 +272,18 @@ struct PointValue
   enum class Status
   {
     ok,
-    no_time,         // no run covers the time
-    outside_grid,    // point not on the model's grid
-    no_field,        // variable/level not stored
-    level_required,  // several levels, no vertical coordinate given
-    out_of_levels,   // vertical coordinate outside the stored levels
+    no_time,          // no run covers the time
+    outside_grid,     // point not on the model's grid
+    no_field,         // variable/level not stored
+    level_required,   // several levels, no vertical coordinate given
+    out_of_levels,    // vertical coordinate outside the stored levels
+    ambiguous_field,  // several signatures of the parameter (catalog)
   };
 
   std::string model;
-  std::string field;  // the spec as requested (canonical)
-  const VariableInfo* var = nullptr;
+  std::string field;                  // the spec as requested (canonical)
+  const VariableInfo* var = nullptr;  // registry entry, if any
+  std::string units;
   Status status = Status::ok;
   // NaN unless status is ok and the point has data.
   double value = std::numeric_limits<double>::quiet_NaN();
@@ -244,11 +295,13 @@ struct PointResult
 {
   std::vector<PointValue> values;  // model order, then field order
   std::vector<std::pair<std::string, ObsHit>> obs;  // (source, hit)
+  std::vector<NameWarning> warnings;  // best guesses (models, fields)
 };
 
 // std::invalid_argument for an inconsistent query (both level_hpa and
-// alt_m, non-finite coordinates, unknown model).  `obs` may be null if
-// q.obs is false.
+// alt_m, non-finite coordinates); NameError for model / field names the
+// store cannot resolve (q.models and q.fields are resolved here).  `obs` may be
+// null if q.obs is false.
 PointResult point(
   const FieldStore& store,
   const ObsIndex* obs,
@@ -268,6 +321,8 @@ std::int64_t parse_iso8601(std::string_view text);
 // JSON for /v1/point.  Values are rounded to float precision (that is what
 // is stored); NaN becomes null.  Valid while the snapshot is held.
 nlohmann::json to_json(const PointResult& r);
+// The "warnings" array of a response (Q20b).
+nlohmann::json warnings_json(const std::vector<NameWarning>& w);
 // JSON for /v1/meta: models with runs, forecast hours and fields; obs
 // source classes; station generation.
 nlohmann::json meta_json(const Snapshot& s, const FieldStore& store);

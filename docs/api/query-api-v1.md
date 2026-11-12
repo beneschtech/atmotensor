@@ -107,6 +107,52 @@ valid time = run + fhr hours.
 `200 text/plain` `ok snapshot 12` when serving; `503` `no snapshot` before
 the first publish. For load balancers and monitoring.
 
+### Names of models and fields (with the grid catalog) — Draft (T17c)
+
+When the daemon runs with `--catalog`, `/v1/meta`, `/v1/point` and
+`/v1/tiles` read gridded data from the grid catalog (observations are
+unchanged):
+
+- **Model names** are model + grid names (`api_name`, set in the web app,
+  e.g. `gfs_0.25p`); `/v1/meta` lists them. Only deterministic runs
+  (member −1) on viewable grids are used.
+- **Field names** (the part of a field spec before `@level`) are, in this
+  order: a *common name* from the web app (e.g. `air_temperature`, seeded
+  from the old variable list so existing specs keep working), or the
+  parameter's name lower-cased with spaces as underscores
+  (`temperature`, `total_precipitation_3hr`). `/v1/meta` and the
+  responses use the common name if the parameter has one, else the
+  normalised name. Units are the parameter's (see the catalog section).
+- **Matching** (every name argument, case-insensitive):
+  1. an exact name is used silently;
+  2. otherwise names *containing* the text are candidates (models: model
+     names, then model slugs; fields: common names, then parameter
+     names): exactly one → used as a **best guess**, reported in
+     `warnings`; several → `400 ambiguous_name` with up to 20
+     `candidates` in the error body; none → `404 not_found`.
+  Two parameters with the same normalised name (e.g. NCEP-local and WMO
+  "categorical rain") → `400 ambiguous_field`; give one a common name.
+- **Warnings**: JSON responses carry
+  `"warnings": [{"code": "best_guess", "argument": "models", "asked": "gfs",
+  "used": "gfs_0.25p", "message": "..."}]` and use the resolved name in
+  the body. Tiles carry the same as an `X-Atmo-Warning` header per guess
+  and are `Cache-Control: no-store` when a guess was used. Clients that
+  pick names from `/v1/meta` or `/v1/grib/tree` never see a guess.
+- Times: forecast hours are whole hours; sub-hourly offsets (RRFS
+  15-minute output) are only reachable through `/v1/grib/*` for now.
+- First-bucket repair: a fixed-length accumulation (e.g.
+  `total_precipitation_1hr`) at its first hour (f01) has no message of its
+  own in GFS-style output, where the 0–1 h interval is labelled "since run
+  start"; the run-total message for exactly that interval is used.
+- A parameter present more than once at the same level and time in a run
+  (two different signatures) → value status `ambiguous_field` (point),
+  `409 ambiguous_field` (tiles).
+- Tiles from the catalog are `Cache-Control: no-cache` with an `ETag` and
+  `X-Atmo-Generation` (a newer copy of a message can replace the data of
+  a run and hour); `immutable` stays for snapshot-only deployments.
+- A snapshot is still needed (observations, `snapshot` in responses):
+  without one, `/v1/meta` and `/v1/point` answer `503 no_snapshot`.
+
 ### GET /v1/meta — Stable
 
 What is available. Parameters: `snapshot` (optional).
@@ -191,7 +237,8 @@ Rules:
 - `status`: `ok` (value may still be `null` where the model has no data at
   that point, e.g. masked), `no_time` (no run covers the time),
   `outside_grid`, `no_field` (not stored), `level_required`,
-  `out_of_levels` (vertical coordinate above/below the stored levels).
+  `out_of_levels` (vertical coordinate above/below the stored levels),
+  `ambiguous_field` (catalog only, see "Names").
   `run`/`fhr` are present unless the status is `no_time` or `outside_grid`;
   `fhr` is fractional when interpolated in time.
 - `obs`: ordered by source, then distance. `distance` is in the source's
@@ -263,6 +310,162 @@ map.addSource('gfs-t2m', {
 
 Performance on GFS 0.25°: ~6 ms per tile once the message is decoded;
 the first tile of a (field, run, fhr) also decodes it (~30–250 ms).
+
+### Grid catalog: GET /v1/grib/... — Stable (T17, approved 2026-11-12)
+
+Every GRIB message the engine has ingested, reachable by id (D13,
+`docs/design/07-grib-catalog.md`). The first seven endpoints are the
+LEADS-style drill-down the web selector uses:
+
+    centre -> subcentre -> model -> grid -> run (base time, member)
+           -> parameter -> level -> forecast offset -> message id
+
+Only available when the daemon runs with `--catalog CONFIG`; otherwise
+`404 not_found`.
+
+Common rules:
+
+- Ids are the catalog's integer ids, passed back verbatim. When a newer
+  copy of a message (same run, parameter, level, offsets) with different
+  bytes arrives ("latest wins"), it gets a **new id**; the old id then
+  answers every `/v1/grib/messages/{id}...` request with `410 replaced`
+  and `"replaced_by": <new id>` in the error body (always the live
+  message, also after several replacements). A copy with identical bytes
+  keeps its id. So a message id always means the same data; it can only
+  disappear (`410` while its replacement exists, `404` once that expired).
+- Every response has `X-Atmo-Generation: <n>`: the catalog's data version,
+  bumped by every ingest. JSON bodies carry it as `generation`. These
+  responses are `Cache-Control: no-store`, except tiles (below).
+- `snapshot=` does not apply here.
+- Lists are sorted as stated; times as everywhere (ISO 8601 UTC); offsets
+  are seconds after the base time.
+- Unknown parameters (no name yet) are listed and served like any other:
+  `status: "unknown"`, a generic name `Unknown <discipline>/<category>/<number>`,
+  values in the message's native GRIB units, `units` as eccodes reports
+  them (often `"unknown"`).
+- Names: `name`, `short_name` and `units` are the web app's
+  grib_parameter row. The engine's defaults are the level-independent
+  GRIB2 code table 4.2 name and units ("Temperature", "K" for 2 m and
+  850 hPa alike), plus the interval and statistic of a statistical
+  parameter ("Total precipitation 3hr", "Wind speed maximum 1hr");
+  `short_name` is `""` until the web app sets one.
+- `viewable: false` marks a grid the engine cannot display natively
+  (reduced Gaussian, spectral, ...). Its messages are listed like any
+  other and can be downloaded (raw and decoded values, below); point and
+  tiles on them answer `409 not_sampleable`.
+- `api_name` (on a model + grid) is the model name `/v1/point` and
+  `/v1/tiles` accept, e.g. `gfs_0.25p`: unique, `[a-z0-9_.-]+`, set by the
+  web app; until then a long default `<model name or slug>_<grid name>`.
+- Model aliases: files whose (centre, subcentre, process id) the web app
+  maps to another model are listed under that model (e.g. GFS analysis
+  files, process 81, under the GFS forecast model, so runs have hour 0);
+  `message.process_id` keeps the value from the file.
+- Values are converted to the parameter's units (`native * si_scale +
+  si_offset`); for eccodes-named parameters that is the GRIB2 unit, which
+  is SI. Winds are returned **as stored** (one component per message):
+  `uv_relative_to_grid: true` on the message says they are grid-relative.
+
+| Endpoint | Parameters | Response list (sorted by) |
+|---|---|---|
+| `GET /v1/grib/centers` | — | `centers`: `{id, code, name, subcenters: [{id, code, name}]}` (code) |
+| `GET /v1/grib/models` | `center`, `subcenter` (ids, optional filters) | `models`: `{id, center, subcenter, process_id, slug, name}` (center code, subcenter code, process id) |
+| `GET /v1/grib/grids` | `model` (required) | `grids`: `{id, name, api_name, grid: {key, type, ni, nj, periodic_i, bbox: [w, s, e, n], viewable}}` (name) |
+| `GET /v1/grib/runs` | `model_grid` (required) | `runs`: `{id, basetime, member, member_type}` (newest base time first, then member) |
+| `GET /v1/grib/parameters` | `run` (required) | `parameters`: `{signature, name, short_name, units, status, stat_interval_s, base_signature, discipline, category, number, pdt}` (name) |
+| `GET /v1/grib/levels` | `run`, `signature` (required) | `levels`: `{level1: {type, value}, level2: {type, value} or null}` (type, value) |
+| `GET /v1/grib/offsets` | `run`, `signature`, `level` (required), `level2` | `offsets`: `{message, offset_start_s, offset_end_s, valid_time, from_run_total}` (offset_end_s) |
+
+- `signature` is the 16-hex-digit parameter signature from
+  `/v1/grib/parameters`; `base_signature` ties together the interval
+  siblings of a statistical parameter (1 h, 3 h, run total).
+  `stat_interval_s`: `null` instantaneous, `0` since run start, else the
+  bucket length.
+- `level` / `level2` are `<type>:<value>` (code table 4.5 type, value in
+  SI), e.g. `level=100:85000`. `level2` omitted = no second surface.
+- **First-bucket repair**: the first bucket of a run (0–1 h at f01, 0–3 h
+  at f03) starts at the base time, so its header calls it "since run
+  start". `offsets` of a fixed-length parameter of N seconds therefore
+  also lists the run-total sibling's message whose interval is exactly
+  0..N, with `from_run_total: true`.
+- Unknown `run` / `model_grid` / `model` id → `404 not_found`; a malformed
+  one → `400 bad_request`.
+
+`GET /v1/grib/messages/{id}` — everything about one message:
+
+```json
+{
+  "generation": 41,
+  "message": {
+    "id": 123456, "run": {"id": 9, "basetime": "2026-11-08T18:00:00Z", "member": -1, "member_type": null},
+    "model": {"id": 3, "slug": "7-0-96", "name": "", "process_id": 96},
+    "center": {"code": 7, "name": ""}, "subcenter": {"code": 0, "name": ""},
+    "grid": {"key": "a1b2c3d4e5f60718", "type": 0, "ni": 1440, "nj": 721,
+             "periodic_i": true, "bbox": [-180, -90, 179.75, 90], "viewable": true,
+             "name": "0.25DEG LL WORLDWIDE", "api_name": "gfs_0.25p"},
+    "process_id": 96,
+    "parameter": {"signature": "0011223344556677", "name": "Temperature",
+                  "short_name": "", "units": "K", "status": "identified",
+                  "stat_interval_s": null, "canonical": "v2\ncentre=7\n..."},
+    "level1": {"type": 100, "value": 85000}, "level2": null,
+    "offset_start_s": 21600, "offset_end_s": 21600, "valid_time": "2026-11-09T00:00:00Z",
+    "file": {"path": "grib/gfs/2026110818/gfs.t18z.pgrb2.0p25.f006",
+             "byte_offset": 1234567, "byte_length": 712345},
+    "content_hash": "8899aabbccddeeff", "flags": [], "sampleable": true
+  }
+}
+```
+
+`flags` lists `undecodable` and/or `grid_unsupported`; such messages have
+`sampleable: false` and their point / tile requests answer
+`409 not_sampleable`.
+
+**Downloads** (any message, including those on grids that cannot be
+displayed natively; `X-Atmo-Generation` as usual):
+
+- `GET /v1/grib/messages/{id}/raw` — the GRIB2 message exactly as stored
+  (`application/x-grib2`, `Content-Disposition: attachment;
+  filename="<id>.grib2"`). `ETag` = content hash, `Cache-Control:
+  no-cache` (`v=<content_hash>` → immutable, as for tiles).
+- `GET /v1/grib/messages/{id}/values` — the decoded values in the file's
+  own point order (scan order of the message, not reordered),
+  little-endian float32, `NaN` where missing, converted like `point`
+  (`application/octet-stream`). Headers: `X-Atmo-Count` (number of
+  values), `X-Atmo-Units`, `X-Atmo-Grid` (grid id). Place them with
+  `/v1/grib/grids/{id}` or the raw message. `409 not_sampleable` only for
+  undecodable messages; `503 no_decoder` without eccodes.
+- `GET /v1/grib/grids/{id}` — `grid`: `{id, key, type, ni, nj,
+  periodic_i, bbox, viewable, summary}`; `summary` is the engine's
+  description (eccodes `gridType`, increments, projection keys).
+
+`GET /v1/grib/tree?depth=&parameters=` — the whole drill-down in one
+call, from the in-memory tables (so clients can pick exact names):
+`centers[] -> subcenters[] -> models[] -> grids[] -> runs[]`, where a
+grid is `{id, name, api_name, viewable, grid_id}` and a run
+`{id, basetime, member, member_type, parameters (count), first_offset_s,
+last_offset_s}`. `depth=centers|models|grids|runs` (default `runs`) stops
+early; `parameters=1` adds each run's `parameter_list`:
+`{signature, name, field, common_names}` (`field` = the name `/v1/point`
+uses). Sorted like the single-level lists.
+
+`GET /v1/grib/messages/{id}/point?lat=&lon=` — bilinear value at one
+place:
+
+```json
+{"generation": 41, "message": 123456, "lat": 35.39, "lon": -97.6,
+ "units": "K", "status": "ok", "value": 281.25, "uv_relative_to_grid": false}
+```
+
+`status`: `ok` or `outside_grid` (value `null`); `value` may be `null`
+where the message has no data (bitmap).
+
+`GET /v1/grib/messages/{id}/tiles/{z}/{x}/{y}.png?cmap=&nodata=[&v=]` —
+map tile of one message, same rendering, colormap syntax and status
+codes as `/v1/tiles`. `cmap` values are in the units `point` reports.
+Because a message id can be replaced by a newer copy, tiles are
+`Cache-Control: no-cache` with an `ETag` (revalidate with
+`If-None-Match` → `304`); pass `v=<content_hash>` from the message
+details to get `Cache-Control: public, max-age=31536000, immutable`
+instead (a `v` that no longer matches → `404 not_found`).
 
 ### POST /v1/route — Draft
 

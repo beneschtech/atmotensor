@@ -5,7 +5,8 @@
     grids/<key>.grid                         gridstore.h (done)
     stations/stations-<gen>.tbl
     obs/<source>/<bucket_start>/<seg-id>.seg
-    grib/<model>/<run YYYYmmddHH>/<file>      GRIB2 as published + <file>.idx.json (T10c)
+    grib/<model>/<run YYYYmmddHH>/<file>      GRIB2 as published; listed by the grid catalog
+                                             (07-grib-catalog.md), not the manifest (T18)
     fields/<model>/<run YYYYmmddHH>/f<fhr:03>.fld   f32 tiles (T7; optional hot set)
     journal/<source>-<YYYYmmddHH>.jrn        raw feed journal (see below)
     manifest/MANIFEST-<seq:016x>.json        immutable
@@ -65,16 +66,20 @@ retirement is recorded in the manifest itself:
   edit it. This also retires replaced station generations.
 - `collect_garbage(grace)`: (1) retired entries older than the grace period
   are dropped from the manifest (one publish), then unlinked; (2) any
-  regular file under `grids/`, `stations/`, `fields/`, `obs/` or `tmp/`
+  regular file under `stations/`, `fields/`, `obs/` or `tmp/`
   that the current manifest neither lists nor retires and whose mtime is
   older than the grace period is unlinked (crash leftovers, temp files);
   (3) emptied data directories are removed. `manifest/`, `config/` and
-  `journal/` are never touched.
+  `journal/` are never touched, nor are `grids/` and `grib/`: the grid
+  catalog keeps files there that no manifest names; it removes its own
+  (Catalog::expire, T18, QUESTIONS.md Q23).
 - Retention itself is `apply_retention()` (retention.h), a pure function of
   (manifest, now, policy): obs buckets expire when bucket_start +
   bucket_seconds (the segment's own, recorded in its entry) < now -
-  retain_seconds; fields keep the newest K runs per model; grids no
-  remaining field uses expire.
+  retain_seconds; fields keep the newest K runs per model; grids never
+  expire (shared with the grid catalog, T18). Manifest format version 2
+  has no `gribs` list; version 1 manifests are still read (their index
+  sidecars are retired, the GRIB files left to the catalog).
 - A `?snapshot=<seq>` pin works only while the files still exist, i.e.
   within the grace period of anything that snapshot needs.
 

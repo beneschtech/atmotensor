@@ -307,32 +307,6 @@ void Manifest::validate() const
     add_path(f.path);
   }
 
-  for (const auto& g : gribs)
-  {
-    if (!SourceClass::valid_name(g.model))
-    {
-      bad("grib: bad model name \"" + g.model + "\"");
-    }
-    check_path(g.path, "grib/" + g.model);
-    if (g.index_path != g.path + ".idx.json")
-    {
-      bad("grib " + g.path + ": index_path must be path + \".idx.json\"");
-    }
-    if (g.grids.empty())
-    {
-      bad("grib " + g.path + ": no grids");
-    }
-    for (GridKey k : g.grids)
-    {
-      if (!keys.count(k))
-      {
-        bad("grib " + g.path + ": grid " + key_hex(k) + " not listed");
-      }
-    }
-    add_path(g.path);
-    add_path(g.index_path);
-  }
-
   for (const auto& s : segments)
   {
     if (!sources.find(s.source))
@@ -394,11 +368,6 @@ std::vector<std::string> Manifest::live_paths() const
   {
     v.push_back(f.path);
   }
-  for (const auto& g : gribs)
-  {
-    v.push_back(g.path);
-    v.push_back(g.index_path);
-  }
   for (const auto& e : segments)
   {
     v.push_back(e.path);
@@ -447,24 +416,6 @@ json Manifest::to_json() const
        {"header_crc", e.header_crc}});
   }
   j["fields"] = std::move(f);
-  json gr = json::array();
-  for (const auto& e : gribs)
-  {
-    json keys = json::array();
-    for (GridKey k : e.grids)
-    {
-      keys.push_back(key_hex(k));
-    }
-    gr.push_back(
-      {{"model", e.model},
-       {"run", e.run_s},
-       {"path", e.path},
-       {"index_path", e.index_path},
-       {"index_crc", e.index_crc},
-       {"size", e.size},
-       {"grids", std::move(keys)}});
-  }
-  j["gribs"] = std::move(gr);
   json s = json::array();
   for (const auto& e : segments)
   {
@@ -495,17 +446,31 @@ std::string Manifest::to_text() const
 
 Manifest Manifest::from_json(const json& j)
 {
-  check_keys(
-    j, "manifest",
-    {"format", "version", "seq", "created_at", "next_receipt_seq", "sources",
-     "stations", "grids", "fields", "gribs", "segments", "retired"});
+  if (
+    !j.is_object() || !j.contains("version") ||
+    !j.at("version").is_number_integer() ||
+    (j.at("version") != kVersion && j.at("version") != 1))
+  {
+    bad("unsupported \"version\" (want " + std::to_string(kVersion) + ")");
+  }
+  const bool v1 = j.at("version") == 1;
+  if (v1)
+  {
+    check_keys(
+      j, "manifest",
+      {"format", "version", "seq", "created_at", "next_receipt_seq", "sources",
+       "stations", "grids", "fields", "gribs", "segments", "retired"});
+  }
+  else
+  {
+    check_keys(
+      j, "manifest",
+      {"format", "version", "seq", "created_at", "next_receipt_seq", "sources",
+       "stations", "grids", "fields", "segments", "retired"});
+  }
   if (!j.at("format").is_string() || j.at("format") != kFormat)
   {
     bad(std::string("\"format\" must be \"") + kFormat + "\"");
-  }
-  if (!j.at("version").is_number_integer() || j.at("version") != kVersion)
-  {
-    bad("unsupported \"version\" (want " + std::to_string(kVersion) + ")");
   }
   Manifest m;
   m.seq = get_u64(j, "seq", "manifest");
@@ -546,29 +511,6 @@ Manifest Manifest::from_json(const json& j)
     e.header_crc = get_u32(f, "header_crc", "manifest: field");
     m.fields.push_back(std::move(e));
   }
-  for (const auto& g : detail::get_array(j, "gribs", "manifest"))
-  {
-    check_keys(
-      g, "manifest: grib",
-      {"model", "run", "path", "index_path", "index_crc", "size", "grids"});
-    GribEntry e;
-    e.model = get_str(g, "model", "manifest: grib");
-    e.run_s = get_i64(g, "run", "manifest: grib");
-    e.path = get_str(g, "path", "manifest: grib");
-    e.index_path = get_str(g, "index_path", "manifest: grib");
-    e.index_crc = get_u32(g, "index_crc", "manifest: grib");
-    e.size = get_u64(g, "size", "manifest: grib");
-    for (const auto& k : detail::get_array(g, "grids", "manifest: grib"))
-    {
-      if (!k.is_string())
-      {
-        bad("grib: grid keys must be strings");
-      }
-      json one{{"k", k}};
-      e.grids.push_back(get_key(one, "k", "manifest: grib"));
-    }
-    m.gribs.push_back(std::move(e));
-  }
   for (const auto& s : detail::get_array(j, "segments", "manifest"))
   {
     check_keys(
@@ -593,6 +535,21 @@ Manifest Manifest::from_json(const json& j)
       RetiredEntry{
         get_str(r, "path", "manifest: retired"),
         get_i64(r, "retired_at", "manifest: retired")});
+  }
+  if (v1 && j.contains("gribs"))
+  {
+    // T10c GRIB entries (T18): only their index sidecars are retired.
+    for (const auto& g : detail::get_array(j, "gribs", "manifest"))
+    {
+      const std::string idx = get_str(g, "index_path", "manifest: grib");
+      const bool dup = std::any_of(
+        m.retired.begin(), m.retired.end(),
+        [&](const RetiredEntry& r) { return r.path == idx; });
+      if (!dup)
+      {
+        m.retired.push_back(RetiredEntry{idx, m.created_at_s});
+      }
+    }
   }
   m.validate();
   return m;
@@ -845,11 +802,6 @@ const Manifest& ManifestPublisher::publish_impl(
   {
     must_exist(f.path);
   }
-  for (const auto& g : next.gribs)
-  {
-    must_exist(g.path);
-    must_exist(g.index_path);
-  }
   for (const auto& s : next.segments)
   {
     must_exist(s.path);
@@ -945,7 +897,9 @@ GcReport ManifestPublisher::collect_garbage(std::int64_t grace_s)
   {
     named.insert(r.path);
   }
-  for (const char* kind : {"grids", "stations", "fields", "grib", "obs", "tmp"})
+  // Not grids/ or grib/: the grid catalog (D13) keeps files there that no
+  // manifest names; Catalog::expire() removes its own (T18).
+  for (const char* kind : {"stations", "fields", "obs", "tmp"})
   {
     const fs::path top = root_ / kind;
     std::error_code ec;

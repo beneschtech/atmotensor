@@ -79,22 +79,6 @@ struct FieldEntry
     const FieldFile& file);
 };
 
-// A GRIB2 file kept as published plus its index sidecar (T10c, Q10;
-// gribstore.h).  One model run per file; its forecast hours and fields are
-// in the index.
-struct GribEntry
-{
-  std::string model;
-  std::int64_t run_s = 0;
-  std::string path;             // grib/<model>/<run YYYYmmddHH>/<file name>
-  std::string index_path;       // path + ".idx.json"
-  std::uint32_t index_crc = 0;  // CRC-32 of the index file's bytes
-  std::uint64_t size = 0;       // GRIB file size
-  std::vector<GridKey> grids;   // grids its messages use (in grids)
-
-  bool operator==(const GribEntry&) const = default;
-};
-
 struct SegmentEntry
 {
   std::string source;  // a source class of the manifest
@@ -130,7 +114,11 @@ struct RetiredEntry
 struct Manifest
 {
   static constexpr const char* kFormat = "atmo-manifest";
-  static constexpr int kVersion = 1;
+  // 2 (T18, D13): no "gribs" list; GRIB files belong to the grid catalog.
+  // Version 1 is still read: its gribs' .idx.json sidecars become retired
+  // entries (unlinked after the grace period), the GRIB files themselves
+  // are left alone (the catalog may use the same files).
+  static constexpr int kVersion = 2;
 
   std::uint64_t seq = 0;  // 0 = nothing published yet
   std::int64_t created_at_s = 0;
@@ -141,7 +129,6 @@ struct Manifest
   std::optional<StationsEntry> stations;
   std::vector<GridEntry> grids;
   std::vector<FieldEntry> fields;
-  std::vector<GribEntry> gribs;
   std::vector<SegmentEntry> segments;
   // Managed by ManifestPublisher (publish() and collect_garbage()); never
   // names a file the manifest also lists.
@@ -224,8 +211,8 @@ class ManifestPublisher
   // Retirement and gc (02-manifest-and-processes.md):
   //  1. retired files whose grace period is over are dropped from the
   //     retired list (one publish), then unlinked;
-  //  2. any regular file under grids/, stations/, fields/, grib/, obs/ or
-  //     tmp/
+  //  2. any regular file under stations/, fields/, obs/ or tmp/ (not
+  //     grids/ or grib/, which the grid catalog shares, T18)
   //     that the current manifest neither lists nor retires and whose mtime
   //     is at least `grace_s` old is unlinked (crash leftovers, temp files,
   //     files whose retired entry was already dropped);

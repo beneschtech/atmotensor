@@ -231,8 +231,8 @@ TEST(retention_field_runs_and_grids)
   CHECK(p.runs_for("hrrr") == 4 && p.runs_for("gfs") == 1);
   const RetentionResult r = apply_retention(m, kBucket, p);
   CHECK(r.fields_expired == 4 + 2);
-  CHECK(r.grids_expired == 1);
-  CHECK(r.manifest.grids.size() == 2);
+  // Grids never expire: grids/ is shared with the grid catalog (T18).
+  CHECK(r.manifest.grids.size() == 3);
   std::size_t hrrr = 0;
   for (const auto& f : r.manifest.fields)
   {
@@ -396,6 +396,11 @@ TEST(gc_orphans_and_empty_dirs)
   const fs::path orphan_tmp = td.p / "tmp/staging/a.bin";
   const fs::path orphan_temp =
     td.p / "stations/stations-0000000000000009.tbl.tmp.123.0";
+  // The grid catalog's files: named by no manifest, never collected (T18).
+  const fs::path cat_grib = td.p / "grib/gfs/2026110818/gfs.t18z.f000";
+  const fs::path cat_grid = td.p / "grids/00112233aabbccdd.grid";
+  write_junk(cat_grib, old_t);
+  write_junk(cat_grid, old_t);
   const fs::path young = td.p / "fields/hrrr/2025110509/f000.fld";
   const fs::path young_tmp = td.p / "tmp/b.bin";
   write_junk(orphan_seg, old_t);
@@ -420,6 +425,7 @@ TEST(gc_orphans_and_empty_dirs)
   CHECK(fs::exists(young) && fs::exists(young_tmp));
   CHECK(fs::exists(cfg) && fs::exists(jrn) && fs::exists(man));
   CHECK(fs::exists(td.p / m.segments[0].path));
+  CHECK(fs::exists(cat_grib) && fs::exists(cat_grid));
   // Emptied directories go; top-level and non-empty ones stay.
   CHECK(!fs::exists(orphan_seg.parent_path()));
   CHECK(!fs::exists(td.p / "tmp/staging"));

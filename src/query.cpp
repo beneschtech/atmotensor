@@ -61,9 +61,37 @@ bool parse_number(std::string_view s, double& out)
          std::isfinite(out);
 }
 
-bool is_wind_component(std::uint16_t code)
+ParamRole registry_role(std::uint16_t code)
 {
-  return code == var::kWindU || code == var::kWindV;
+  switch (code)
+  {
+    case var::kWindU:
+      return ParamRole::wind_u;
+    case var::kWindV:
+      return ParamRole::wind_v;
+    case var::kGeopotentialHeight:
+      return ParamRole::geopotential_height;
+    default:
+      return ParamRole::other;
+  }
+}
+
+// "@2m", "@850hPa", ...: the level part of a canonical spec.
+std::string level_suffix(std::uint8_t type, float value)
+{
+  switch (type)
+  {
+    case kLevelSurface:
+      return "@sfc";
+    case kLevelMsl:
+      return "@msl";
+    case kLevelHeightAgl:
+      return "@" + format_number(value) + "m";
+    case kLevelIsobaric:
+      return "@" + format_number(value / 100.0) + "hPa";
+    default:
+      return "@L" + std::to_string(type) + "=" + format_number(value);
+  }
 }
 
 // One model at one (run, fhr): grid, located cell and field list.
@@ -100,6 +128,23 @@ class Sampler
   Sampler(const FieldStore& store, std::string_view model, const PointQuery& q)
       : store_(store), model_(model), q_(q)
   {
+  }
+
+  // Parameters of `role` present in the slice (first seen first).
+  std::vector<std::uint16_t> with_role(const TimeSlice& ts, ParamRole role)
+    const
+  {
+    std::vector<std::uint16_t> out;
+    for (const auto& f : ts.fields)
+    {
+      if (
+        std::find(out.begin(), out.end(), f.param_id) == out.end() &&
+        store_.param(f.param_id).role == role)
+      {
+        out.push_back(f.param_id);
+      }
+    }
+    return out;
   }
 
   // Value of `code` at the requested level at one time slice.
@@ -177,6 +222,10 @@ class Sampler
     {
       return PointValue::Status::no_field;
     }
+    if (f->flags & kFieldAmbiguous)
+    {
+      return PointValue::Status::ambiguous_field;
+    }
     grid_relative = grid_relative || (f->flags & kFieldGridRelative) != 0;
     out = store_.sample(model_, ts.t, k, *ts.cell);
     return PointValue::Status::ok;
@@ -225,8 +274,14 @@ class Sampler
     const auto hi = std::upper_bound(p.begin(), p.end(), p_pa);
     const float p2 = *hi, p1 = *(hi - 1);
     double v1 = 0.0, v2 = 0.0;
-    fixed(ts, FieldKey{code, kLevelIsobaric, p1}, v1, grid_relative);
-    fixed(ts, FieldKey{code, kLevelIsobaric, p2}, v2, grid_relative);
+    const auto s1 =
+      fixed(ts, FieldKey{code, kLevelIsobaric, p1}, v1, grid_relative);
+    const auto s2 =
+      fixed(ts, FieldKey{code, kLevelIsobaric, p2}, v2, grid_relative);
+    if (s1 != PointValue::Status::ok || s2 != PointValue::Status::ok)
+    {
+      return s1 != PointValue::Status::ok ? s1 : s2;
+    }
     const double w =
       std::log(p_pa / p1) / std::log(static_cast<double>(p2) / p1);
     out = v1 + w * (v2 - v1);
@@ -242,7 +297,17 @@ class Sampler
   {
     // Isobaric levels that have both the variable and geopotential height.
     const std::vector<float> pv = isobaric_levels(ts, code);
-    const std::vector<float> pz = isobaric_levels(ts, var::kGeopotentialHeight);
+    std::uint16_t gh_id = 0;
+    std::vector<float> pz;
+    for (const std::uint16_t id : with_role(ts, ParamRole::geopotential_height))
+    {
+      pz = isobaric_levels(ts, id);
+      gh_id = id;
+      if (!pz.empty())
+      {
+        break;
+      }
+    }
     std::vector<std::pair<double, float>> zs;  // (geometric z, level)
     for (float lv : pv)
     {
@@ -252,8 +317,7 @@ class Sampler
       }
       double gh = 0.0;
       bool unused = false;
-      fixed(
-        ts, FieldKey{var::kGeopotentialHeight, kLevelIsobaric, lv}, gh, unused);
+      fixed(ts, FieldKey{gh_id, kLevelIsobaric, lv}, gh, unused);
       if (std::isfinite(gh))
       {
         zs.push_back({geometric_from_geopotential(gh), lv});
@@ -275,15 +339,24 @@ class Sampler
       ++k;
     }
     double v1 = 0.0;
-    fixed(ts, FieldKey{code, kLevelIsobaric, zs[k].second}, v1, grid_relative);
+    const auto s1 = fixed(
+      ts, FieldKey{code, kLevelIsobaric, zs[k].second}, v1, grid_relative);
+    if (s1 != PointValue::Status::ok)
+    {
+      return s1;
+    }
     if (k + 1 == zs.size() || zs[k].first == alt_m)
     {
       out = v1;
       return PointValue::Status::ok;
     }
     double v2 = 0.0;
-    fixed(
+    const auto s2 = fixed(
       ts, FieldKey{code, kLevelIsobaric, zs[k + 1].second}, v2, grid_relative);
+    if (s2 != PointValue::Status::ok)
+    {
+      return s2;
+    }
     const double w = (alt_m - zs[k].first) / (zs[k + 1].first - zs[k].first);
     out = v1 + w * (v2 - v1);
     return PointValue::Status::ok;
@@ -338,6 +411,51 @@ std::int64_t ModelTime::valid_s() const
 
 FieldStore::~FieldStore() = default;
 
+NameError::NameError(
+  int status_,
+  std::string code_,
+  const std::string& message,
+  std::vector<std::string> candidates_)
+    : std::invalid_argument(message),
+      status(status_),
+      code(std::move(code_)),
+      candidates(std::move(candidates_))
+{
+}
+
+ParamInfo FieldStore::param(std::uint16_t id) const
+{
+  const VariableInfo* v = find_variable(id);
+  if (!v)
+  {
+    return {"param" + std::to_string(id), "", ParamRole::other};
+  }
+  return {std::string(v->name), std::string(v->units), registry_role(id)};
+}
+
+ResolvedName FieldStore::resolve_field(std::string_view name) const
+{
+  const VariableInfo* v = find_variable(name);
+  if (!v)
+  {
+    throw NameError(
+      400, "bad_request",
+      "field \"" + std::string(name) + "\": unknown variable");
+  }
+  return {std::string(v->name), v->code, false};
+}
+
+ResolvedName FieldStore::resolve_model(std::string_view name) const
+{
+  const std::vector<std::string> all = models();
+  if (!std::binary_search(all.begin(), all.end(), name))
+  {
+    throw NameError(
+      400, "bad_request", "unknown model \"" + std::string(name) + "\"");
+  }
+  return {std::string(name), 0, false};
+}
+
 FieldView::FieldView(std::shared_ptr<const Grid> grid, FieldInfo info)
     : grid_(std::move(grid)), info_(info)
 {
@@ -382,66 +500,16 @@ class FieldFileView : public FieldView
   std::size_t k_;
 };
 
-class GribView : public FieldView
-{
- public:
-  GribView(std::shared_ptr<const GribMessageData> d, FieldInfo info)
-      : FieldView(d->grid, info), data_(std::move(d))
-  {
-  }
-  double at(std::uint32_t i, std::uint32_t j) const override
-  {
-    return data_->values[static_cast<std::size_t>(j) * grid().ni() + i];
-  }
-
- private:
-  std::shared_ptr<const GribMessageData> data_;
-};
-
 }  // namespace
 
-SnapshotFieldStore::SnapshotFieldStore(
-  std::shared_ptr<const Snapshot> s,
-  GribCache* cache)
-    : snap_(std::move(s)), cache_(cache)
+SnapshotFieldStore::SnapshotFieldStore(std::shared_ptr<const Snapshot> s)
+    : snap_(std::move(s))
 {
   std::map<std::string, std::set<std::pair<std::int64_t, std::uint32_t>>>
     by_model;
   for (const auto& f : snap_->manifest().fields)
   {
     by_model[f.model].insert({f.run_s, f.fhr});
-  }
-  const auto& gribs = snap_->manifest().gribs;
-  const auto& idxs = snap_->grib_indexes();
-  grib_files_.reserve(gribs.size());  // stable addresses for GribMsg::file
-  for (const auto& g : gribs)
-  {
-    grib_files_.push_back(snap_->root() / g.path);
-  }
-  for (std::size_t i = 0; i < gribs.size(); ++i)
-  {
-    for (const auto& e : idxs[i]->entries)
-    {
-      by_model[gribs[i].model].insert({gribs[i].run_s, e.fhr});
-      GribSlice& sl = gribs_[{gribs[i].model, gribs[i].run_s, e.fhr}];
-      if (sl.msgs.empty())
-      {
-        sl.grid = e.grid;
-      }
-      if (e.grid != sl.grid)
-      {
-        continue;
-      }
-      bool dup = false;
-      for (const auto& m : sl.msgs)
-      {
-        dup = dup || m.entry->info.same_field(e.info);
-      }
-      if (!dup)
-      {
-        sl.msgs.push_back(GribMsg{&grib_files_[i], &e});
-      }
-    }
   }
   for (auto& [m, v] : by_model)
   {
@@ -485,14 +553,6 @@ std::shared_ptr<const FieldFile> SnapshotFieldStore::file(
   return snap_->field_file(model, t.run_s, t.fhr);
 }
 
-const SnapshotFieldStore::GribSlice* SnapshotFieldStore::grib_slice(
-  std::string_view model,
-  const ModelTime& t) const
-{
-  auto it = gribs_.find({std::string(model), t.run_s, t.fhr});
-  return it == gribs_.end() ? nullptr : &it->second;
-}
-
 std::shared_ptr<const Grid> SnapshotFieldStore::grid(
   std::string_view model,
   const ModelTime& t) const
@@ -501,8 +561,7 @@ std::shared_ptr<const Grid> SnapshotFieldStore::grid(
   {
     return snap_->grid(f->grid_key());
   }
-  const GribSlice* sl = grib_slice(model, t);
-  return sl ? snap_->grid(sl->grid) : nullptr;
+  return nullptr;
 }
 
 std::vector<FieldInfo> SnapshotFieldStore::fields(
@@ -515,17 +574,6 @@ std::vector<FieldInfo> SnapshotFieldStore::fields(
     for (std::size_t k = 0; k < f->size(); ++k)
     {
       v.push_back(f->field(k));
-    }
-    return v;
-  }
-  if (const GribSlice* sl = grib_slice(model, t))
-  {
-    for (const auto& m : sl->msgs)
-    {
-      FieldInfo fi = m.entry->info;
-      fi.min = std::numeric_limits<float>::quiet_NaN();  // not indexed
-      fi.max = fi.min;
-      v.push_back(fi);
     }
   }
   return v;
@@ -542,39 +590,6 @@ float SnapshotFieldStore::sample(
   {
     auto k = f->find(key.param_id, key.level_type, key.level_value);
     return k ? f->sample(*k, cell) : nan;
-  }
-  const GribSlice* sl = grib_slice(model, t);
-  if (!sl || !cache_)
-  {
-    return nan;
-  }
-  FieldInfo want;
-  want.param_id = key.param_id;
-  want.level_type = key.level_type;
-  want.level_value = key.level_value;
-  for (const auto& m : sl->msgs)
-  {
-    if (!m.entry->info.same_field(want))
-    {
-      continue;
-    }
-    auto g = snap_->grid(sl->grid);
-    if (
-      !g || cell.j + 1 >= g->nj() ||
-      (g->periodic_i() ? cell.i >= g->ni() : cell.i + 1 >= g->ni()))
-    {
-      return nan;
-    }
-    auto d = cache_->get(*m.file, *m.entry, g);
-    const std::uint32_t i1 = cell.i + 1 == g->ni() ? 0 : cell.i + 1;
-    const double* v = d->values.data();
-    const double v00 = v[g->index(cell.i, cell.j)];
-    const double v10 = v[g->index(i1, cell.j)];
-    const double v01 = v[g->index(cell.i, cell.j + 1)];
-    const double v11 = v[g->index(i1, cell.j + 1)];
-    return static_cast<float>(
-      (1.0 - cell.fy) * ((1.0 - cell.fx) * v00 + cell.fx * v10) +
-      cell.fy * ((1.0 - cell.fx) * v01 + cell.fx * v11));
   }
   return nan;
 }
@@ -594,28 +609,6 @@ std::shared_ptr<const FieldView> SnapshotFieldStore::view(
     }
     return std::make_shared<FieldFileView>(std::move(g), f, *k);
   }
-  const GribSlice* sl = grib_slice(model, t);
-  if (!sl || !cache_)
-  {
-    return nullptr;
-  }
-  FieldInfo want;
-  want.param_id = key.param_id;
-  want.level_type = key.level_type;
-  want.level_value = key.level_value;
-  for (const auto& m : sl->msgs)
-  {
-    if (m.entry->info.same_field(want))
-    {
-      auto g = snap_->grid(sl->grid);
-      if (!g)
-      {
-        return nullptr;
-      }
-      return std::make_shared<GribView>(
-        cache_->get(*m.file, *m.entry, g), m.entry->info);
-    }
-  }
   return nullptr;
 }
 
@@ -632,14 +625,15 @@ FieldSpec FieldSpec::parse(std::string_view text)
   FieldSpec s;
   const auto at = text.find('@');
   const std::string_view name = text.substr(0, at);
-  s.var = find_variable(name);
-  if (!s.var)
+  if (name.empty() || name.find(',') != std::string_view::npos)
   {
-    throw bad("unknown variable");
+    throw bad("missing or malformed name");
   }
+  s.name = std::string(name);
+  s.var = find_variable(name);
   if (at == std::string_view::npos)
   {
-    s.text = std::string(name);
+    s.text = s.name;
     return s;
   }
   const std::string_view lv = text.substr(at + 1);
@@ -684,33 +678,36 @@ FieldSpec FieldSpec::parse(std::string_view text)
   {
     throw bad("bad level (use sfc, msl, <x>m, <x>hPa or L<type>=<value>)");
   }
-  FieldInfo fi;
-  fi.param_id = s.var->code;
-  fi.level_type = s.level_type;
-  fi.level_value = s.level_value;
-  s.text = format(fi);
+  s.text = s.name + level_suffix(s.level_type, s.level_value);
   return s;
+}
+
+void FieldSpec::resolve(
+  const FieldStore& store,
+  std::vector<NameWarning>* warnings,
+  const std::string& argument)
+{
+  const ResolvedName r = store.resolve_field(name);
+  param = r.param;
+  if (r.guess && warnings)
+  {
+    warnings->push_back({argument, name, r.name});
+  }
+  text = r.name +
+         (level == Level::fixed ? level_suffix(level_type, level_value) : "");
 }
 
 std::string FieldSpec::format(const FieldInfo& f)
 {
   const VariableInfo* v = find_variable(f.param_id);
-  std::string name =
-    v ? std::string(v->name) : "param" + std::to_string(f.param_id);
-  switch (f.level_type)
-  {
-    case kLevelSurface:
-      return name + "@sfc";
-    case kLevelMsl:
-      return name + "@msl";
-    case kLevelHeightAgl:
-      return name + "@" + format_number(f.level_value) + "m";
-    case kLevelIsobaric:
-      return name + "@" + format_number(f.level_value / 100.0) + "hPa";
-    default:
-      return name + "@L" + std::to_string(f.level_type) + "=" +
-             format_number(f.level_value);
-  }
+  return (v ? std::string(v->name) : "param" + std::to_string(f.param_id)) +
+         level_suffix(f.level_type, f.level_value);
+}
+
+std::string FieldSpec::format(const FieldInfo& f, const FieldStore& store)
+{
+  return store.param(f.param_id).name +
+         level_suffix(f.level_type, f.level_value);
 }
 
 // ---------------------------------------------------------------------------
@@ -743,17 +740,27 @@ PointResult point(
   {
     throw std::invalid_argument("point: no observation index");
   }
-  const std::vector<std::string> all = store.models();
-  std::vector<std::string> models = q.models.empty() ? all : q.models;
-  for (const auto& m : models)
+  PointResult r;
+  std::vector<std::string> models;
+  if (q.models.empty())
   {
-    if (!std::binary_search(all.begin(), all.end(), m))
+    models = store.models();
+  }
+  for (const auto& asked : q.models)
+  {
+    const ResolvedName m = store.resolve_model(asked);
+    if (m.guess)
     {
-      throw std::invalid_argument("point: unknown model \"" + m + "\"");
+      r.warnings.push_back({"models", asked, m.name});
     }
+    models.push_back(m.name);
+  }
+  std::vector<FieldSpec> specs = q.fields;
+  for (auto& spec : specs)
+  {
+    spec.resolve(store, &r.warnings);
   }
 
-  PointResult r;
   for (const auto& m : models)
   {
     const auto picks = pick_times(store.times(m), q.t_s);
@@ -770,12 +777,14 @@ PointResult point(
       slices.push_back(std::move(ts));
     }
     Sampler sampler(store, m, q);
-    for (const auto& spec : q.fields)
+    for (const auto& spec : specs)
     {
+      const ParamInfo info = store.param(spec.param);
       PointValue pv;
       pv.model = m;
       pv.field = spec.text;
       pv.var = spec.var;
+      pv.units = info.units;
       if (picks.empty())
       {
         pv.status = PointValue::Status::no_time;
@@ -796,23 +805,33 @@ PointResult point(
         const TimeSlice& ts = slices[k];
         double v = 0.0;
         bool grid_rel = false;
-        pv.status = sampler.value(ts, spec, spec.var->code, v, grid_rel);
+        pv.status = sampler.value(ts, spec, spec.param, v, grid_rel);
+        const bool is_u = info.role == ParamRole::wind_u;
         if (
           pv.status == PointValue::Status::ok &&
-          is_wind_component(spec.var->code) && grid_rel)
+          (is_u || info.role == ParamRole::wind_v) && grid_rel)
         {
-          // Rotate the grid-relative pair to east/north.
-          const std::uint16_t other =
-            spec.var->code == var::kWindU ? var::kWindV : var::kWindU;
+          // Rotate the grid-relative pair to east/north: the first
+          // partner present at the same level.
           double o = 0.0;
-          bool unused = false;
-          pv.status = sampler.value(ts, spec, other, o, unused);
-          const double u = spec.var->code == var::kWindU ? v : o;
-          const double vv = spec.var->code == var::kWindU ? o : v;
+          auto st = PointValue::Status::no_field;
+          for (const std::uint16_t other : sampler.with_role(
+                 ts, is_u ? ParamRole::wind_v : ParamRole::wind_u))
+          {
+            bool unused = false;
+            st = sampler.value(ts, spec, other, o, unused);
+            if (st != PointValue::Status::no_field)
+            {
+              break;
+            }
+          }
+          pv.status = st;
+          const double u = is_u ? v : o;
+          const double vv = is_u ? o : v;
           double east = 0.0, north = 0.0;
           rotate_to_earth(
             grid_alpha_at(*ts.grid, *ts.cell), u, vv, east, north);
-          v = spec.var->code == var::kWindU ? east : north;
+          v = is_u ? east : north;
         }
         value += picks[k].second * v;
         fhr += picks[k].second * ts.t.fhr;
@@ -867,6 +886,8 @@ const char* to_string(PointValue::Status s)
       return "level_required";
     case PointValue::Status::out_of_levels:
       return "out_of_levels";
+    case PointValue::Status::ambiguous_field:
+      return "ambiguous_field";
   }
   return "?";
 }
@@ -914,6 +935,22 @@ std::int64_t parse_iso8601(std::string_view text)
   return static_cast<std::int64_t>(::timegm(&tm));
 }
 
+nlohmann::json warnings_json(const std::vector<NameWarning>& w)
+{
+  nlohmann::json a = nlohmann::json::array();
+  for (const auto& x : w)
+  {
+    a.push_back(
+      {{"code", "best_guess"},
+       {"argument", x.argument},
+       {"asked", x.asked},
+       {"used", x.used},
+       {"message", "\"" + x.asked + "\" is not a name; used \"" + x.used +
+                     "\", the only name containing it"}});
+  }
+  return a;
+}
+
 nlohmann::json to_json(const PointResult& r)
 {
   using nlohmann::json;
@@ -923,7 +960,7 @@ nlohmann::json to_json(const PointResult& r)
     json e{
       {"model", v.model},
       {"field", v.field},
-      {"units", v.var ? v.var->units : ""},
+      {"units", v.units},
       {"status", to_string(v.status)}};
     e["value"] = std::isfinite(v.value) && v.status == PointValue::Status::ok
                    ? json(tidy(v.value))
@@ -967,7 +1004,12 @@ nlohmann::json to_json(const PointResult& r)
        {"values", std::move(vals)},
        {"raw", std::string(h.report.raw)}});
   }
-  return json{{"values", std::move(values)}, {"obs", std::move(obs)}};
+  json out{{"values", std::move(values)}, {"obs", std::move(obs)}};
+  if (!r.warnings.empty())
+  {
+    out["warnings"] = warnings_json(r.warnings);
+  }
+  return out;
 }
 
 nlohmann::json meta_json(const Snapshot& s, const FieldStore& store)
@@ -994,7 +1036,7 @@ nlohmann::json meta_json(const Snapshot& s, const FieldStore& store)
       std::vector<std::string> names;
       for (const auto& f : store.fields(m, times.back()))
       {
-        names.push_back(FieldSpec::format(f));
+        names.push_back(FieldSpec::format(f, store));
       }
       std::sort(names.begin(), names.end());
       for (auto& n : names)

@@ -27,11 +27,24 @@ struct HttpError : std::runtime_error
 {
   int status;
   std::string code;
-  HttpError(int s, std::string c, const std::string& msg)
-      : std::runtime_error(msg), status(s), code(std::move(c))
+  std::vector<std::string> candidates;  // ambiguous_name (Q20)
+  HttpError(
+    int s,
+    std::string c,
+    const std::string& msg,
+    std::vector<std::string> cands = {})
+      : std::runtime_error(msg),
+        status(s),
+        code(std::move(c)),
+        candidates(std::move(cands))
   {
   }
 };
+
+HttpError from_name_error(const NameError& e)
+{
+  return HttpError(e.status, e.code, e.what(), e.candidates);
+}
 
 fcgi::Response json_response(int status, const json& body)
 {
@@ -42,11 +55,18 @@ fcgi::Response json_response(int status, const json& body)
   return r;
 }
 
-fcgi::Response
-error_response(int status, const std::string& code, const std::string& msg)
+fcgi::Response error_response(
+  int status,
+  const std::string& code,
+  const std::string& msg,
+  const std::vector<std::string>& candidates = {})
 {
-  fcgi::Response r =
-    json_response(status, json{{"error", {{"code", code}, {"message", msg}}}});
+  json err{{"code", code}, {"message", msg}};
+  if (!candidates.empty())
+  {
+    err["candidates"] = candidates;
+  }
+  fcgi::Response r = json_response(status, json{{"error", err}});
   r.headers.push_back({"Cache-Control", "no-store"});
   return r;
 }
@@ -176,11 +196,11 @@ QueryApi::QueryApi(
   fs::path root,
   SnapshotLoader& loader,
   std::size_t pinned_cache,
-  GribCache* grib_cache)
+  const GribApi* grib_api)
     : root_(std::move(root)),
       loader_(loader),
       pinned_cache_(pinned_cache),
-      grib_cache_(grib_cache)
+      grib_api_(grib_api)
 {
 }
 
@@ -192,8 +212,7 @@ QueryApi::View QueryApi::view(std::uint64_t pinned_seq) const
   std::lock_guard<std::mutex> lk(mu_);
   if (cur && current_.snap != cur)
   {
-    current_ =
-      View{cur, std::make_shared<SnapshotFieldStore>(cur, grib_cache_), false};
+    current_ = View{cur, std::make_shared<SnapshotFieldStore>(cur), false};
   }
   if (pinned_seq == 0 || (cur && cur->seq() == pinned_seq))
   {
@@ -233,7 +252,7 @@ QueryApi::View QueryApi::view(std::uint64_t pinned_seq) const
         " can no longer be opened: " + e.what());
   }
   pinned_.push_front(
-    View{snap, std::make_shared<SnapshotFieldStore>(snap, grib_cache_), true});
+    View{snap, std::make_shared<SnapshotFieldStore>(snap), true});
   while (pinned_.size() > pinned_cache_)
   {
     pinned_.pop_back();
@@ -259,6 +278,14 @@ fcgi::Response QueryApi::handle(const fcgi::Request& req) const
     catch (const std::invalid_argument& e)
     {
       throw HttpError(400, "bad_request", e.what());
+    }
+    if (grib_api_ && GribApi::handles(path))
+    {
+      if (method != "GET" && method != "HEAD")
+      {
+        throw HttpError(405, "method_not_allowed", method + " not allowed");
+      }
+      return grib_api_->handle(path, q, req);
     }
     const bool tiles = path.rfind("/v1/tiles/", 0) == 0;
     if (
@@ -299,15 +326,22 @@ fcgi::Response QueryApi::handle(const fcgi::Request& req) const
       throw HttpError(503, "no_snapshot", "no snapshot loaded yet");
     }
 
+    // Gridded data: the grid catalog if configured (T17c), else the
+    // snapshot's fields.
+    std::shared_ptr<const FieldStore> store = v.store;
+    if (grib_api_)
+    {
+      store = grib_api_->field_store();
+    }
     if (tiles)
     {
-      return tile(path, q, req, v);
+      return tile(path, q, req, v, *store);
     }
 
     json body;
     if (path == "/v1/meta")
     {
-      body = meta_json(*v.snap, *v.store);
+      body = meta_json(*v.snap, *store);
     }
     else
     {
@@ -372,8 +406,12 @@ fcgi::Response QueryApi::handle(const fcgi::Request& req) const
           pq.fields.push_back(FieldSpec::parse(f));
         }
         const PointResult res =
-          point(*v.store, &v.snap->obs(), v.snap->sources(), pq);
+          point(*store, &v.snap->obs(), v.snap->sources(), pq);
         body = to_json(res);
+      }
+      catch (const NameError& e)
+      {
+        throw from_name_error(e);
       }
       catch (const std::invalid_argument& e)
       {
@@ -404,7 +442,7 @@ fcgi::Response QueryApi::handle(const fcgi::Request& req) const
   }
   catch (const HttpError& e)
   {
-    return error_response(e.status, e.code, e.what());
+    return error_response(e.status, e.code, e.what(), e.candidates);
   }
 }
 
@@ -412,7 +450,8 @@ fcgi::Response QueryApi::tile(
   const std::string& path,
   const std::map<std::string, std::string>& q,
   const fcgi::Request& req,
-  const View& v) const
+  const View& v,
+  const FieldStore& store) const
 {
   // /v1/tiles/{model}/{field}/{run}/{fhr}/{z}/{x}/{y}.png
   std::vector<std::string> seg;
@@ -449,7 +488,7 @@ fcgi::Response QueryApi::tile(
     return static_cast<std::uint32_t>(n);
   };
   TileRequest tr;
-  tr.model = seg[0];
+  std::vector<NameWarning> warnings;
   try
   {
     tr.field = FieldSpec::parse(seg[1]);
@@ -484,10 +523,31 @@ fcgi::Response QueryApi::tile(
   {
     throw HttpError(400, "bad_request", "bad z/x/y");
   }
-  const auto models = v.store->models();
-  if (!std::binary_search(models.begin(), models.end(), tr.model))
+  try
   {
-    throw HttpError(404, "not_found", "unknown model \"" + tr.model + "\"");
+    const ResolvedName m = store.resolve_model(seg[0]);
+    tr.model = m.name;
+    if (m.guess)
+    {
+      warnings.push_back({"model", seg[0], m.name});
+    }
+  }
+  catch (const NameError& e)
+  {
+    // The registry store says 400 for an unknown model; tiles always 404.
+    if (e.code == "bad_request")
+    {
+      throw HttpError(404, "not_found", e.what());
+    }
+    throw from_name_error(e);
+  }
+  try
+  {
+    tr.field.resolve(store, &warnings, "field");
+  }
+  catch (const NameError& e)
+  {
+    throw from_name_error(e);
   }
   if (!q.count("cmap"))
   {
@@ -505,7 +565,7 @@ fcgi::Response QueryApi::tile(
   {
     throw HttpError(400, "bad_request", e.what());
   }
-  const TileResult res = render_tile(*v.store, tr, cmap);
+  const TileResult res = render_tile(store, tr, cmap);
   if (res.status == TileResult::Status::no_time)
   {
     throw HttpError(404, "no_time", "no data for that run and hour");
@@ -514,13 +574,43 @@ fcgi::Response QueryApi::tile(
   {
     throw HttpError(404, "no_field", "field not stored at that time");
   }
+  if (res.status == TileResult::Status::ambiguous)
+  {
+    throw HttpError(
+      409, "ambiguous_field",
+      "the parameter is stored more than once at that level and time");
+  }
   fcgi::Response r;
   r.content_type = "image/png";
   const std::string etag =
     "\"" + key_hex(fnv1a64(res.png.data(), res.png.size())) + "\"";
   r.headers.push_back({"X-Atmo-Snapshot", std::to_string(v.snap->seq())});
-  // A (run, fhr) never changes once published, so neither does the tile.
-  r.headers.push_back({"Cache-Control", "public, max-age=31536000, immutable"});
+  for (const auto& w : warnings)
+  {
+    r.headers.push_back(
+      {"X-Atmo-Warning",
+       "best_guess " + w.argument + "=" + w.asked + " used " + w.used});
+  }
+  if (!warnings.empty())
+  {
+    // A guess can change when new data arrives.
+    r.headers.push_back({"Cache-Control", "no-store"});
+  }
+  else if (grib_api_)
+  {
+    // Catalog data of a (run, hour) can be replaced (latest wins).
+    r.headers.push_back({"Cache-Control", "no-cache"});
+    r.headers.push_back(
+      {"X-Atmo-Generation",
+       std::to_string(
+         static_cast<const CatalogFieldStore&>(store).generation())});
+  }
+  else
+  {
+    // A (run, fhr) never changes once published, so neither does the tile.
+    r.headers.push_back(
+      {"Cache-Control", "public, max-age=31536000, immutable"});
+  }
   r.headers.push_back({"ETag", etag});
   if (req.param("HTTP_IF_NONE_MATCH") == etag)
   {

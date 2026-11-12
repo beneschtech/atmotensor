@@ -273,8 +273,22 @@ TEST(field_specs_parse_and_format)
     FieldSpec::parse("air_temperature@925.5hPa").text ==
     "air_temperature@925.5hPa");
 
+  // Names are resolved by the store, not by parse (Q19): the default
+  // store knows the registry.
+  s = FieldSpec::parse("nope@2m");
+  CHECK(!s.var && s.name == "nope" && s.text == "nope@2m");
+  FakeStore st;
+  CHECK(throws<NameError>([&] { s.resolve(st, nullptr); }));
+  s = FieldSpec::parse("wind_u@10m");
+  s.resolve(st, nullptr);
+  CHECK(s.param == var::kWindU && s.text == "wind_u@10m");
+  CHECK(st.param(var::kWindU).role == ParamRole::wind_u);
+  CHECK(
+    st.param(var::kGeopotentialHeight).role == ParamRole::geopotential_height);
+  CHECK(st.param(var::kAirTemperature).units == "K");
+
   for (const char* bad :
-       {"nope", "air_temperature@", "air_temperature@abc",
+       {"@2m", "", "air_temperature@", "air_temperature@abc",
         "air_temperature@-5m", "air_temperature@0hPa", "air_temperature@L300=1",
         "air_temperature@Lx=1", "air_temperature@2mm"})
     CHECK(throws<std::invalid_argument>([&] { FieldSpec::parse(bad); }));
