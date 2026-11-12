@@ -141,9 +141,14 @@ std::vector<double> compute(
   {
     throw std::invalid_argument("tile: bad z/x/y");
   }
-  if (r.field.level != FieldSpec::Level::fixed || !r.field.var)
+  if (r.field.level != FieldSpec::Level::fixed)
   {
     throw std::invalid_argument("tile: the field needs an explicit level");
+  }
+  FieldSpec spec = r.field;
+  if (spec.param == 0)
+  {
+    spec.resolve(store, nullptr);
   }
   const ModelTime t{r.run_s, r.fhr};
   if (!store.grid(r.model, t))
@@ -151,23 +156,43 @@ std::vector<double> compute(
     status = TileResult::Status::no_time;
     return {};
   }
-  const std::uint16_t code = r.field.var->code;
-  const FieldKey key{code, r.field.level_type, r.field.level_value};
+  const std::uint16_t code = spec.param;
+  const FieldKey key{code, spec.level_type, spec.level_value};
   auto view = store.view(r.model, t, key);
   if (!view)
   {
     status = TileResult::Status::no_field;
     return {};
   }
-  // Earth-relative winds: rotate grid-relative u/v per pixel.
-  std::shared_ptr<const FieldView> other;
-  const bool wind = code == var::kWindU || code == var::kWindV;
-  if (wind && (view->info().flags & kFieldGridRelative))
+  if (view->info().flags & kFieldAmbiguous)
   {
-    const FieldKey ok{
-      code == var::kWindU ? var::kWindV : var::kWindU, key.level_type,
-      key.level_value};
-    other = store.view(r.model, t, ok);
+    status = TileResult::Status::ambiguous;
+    return {};
+  }
+  // Earth-relative winds: rotate grid-relative u/v per pixel, with the
+  // first partner component stored at the same level.
+  std::shared_ptr<const FieldView> other;
+  const ParamRole role = store.param(code).role;
+  const bool is_u = role == ParamRole::wind_u;
+  if (
+    (is_u || role == ParamRole::wind_v) &&
+    (view->info().flags & kFieldGridRelative))
+  {
+    const ParamRole want = is_u ? ParamRole::wind_v : ParamRole::wind_u;
+    for (const auto& f : store.fields(r.model, t))
+    {
+      if (
+        f.level_type == key.level_type && f.level_value == key.level_value &&
+        store.param(f.param_id).role == want)
+      {
+        other = store.view(
+          r.model, t, FieldKey{f.param_id, key.level_type, key.level_value});
+        if (other)
+        {
+          break;
+        }
+      }
+    }
     if (!other)
     {
       status = TileResult::Status::no_field;
@@ -181,11 +206,11 @@ std::vector<double> compute(
     if (!other)
       return v;
     const double o = other->sample(c);
-    const double u = code == var::kWindU ? v : o;
-    const double vv = code == var::kWindU ? o : v;
+    const double u = is_u ? v : o;
+    const double vv = is_u ? o : v;
     double east = 0.0, north = 0.0;
     rotate_to_earth(grid_alpha_at(g, c), u, vv, east, north);
-    return code == var::kWindU ? east : north;
+    return is_u ? east : north;
   };
 
   // Lattice of located nodes every 16 px.
@@ -279,7 +304,8 @@ render_tile(const FieldStore& store, const TileRequest& r, const Colormap& cmap)
   const std::vector<double> v = compute(store, r, res.status, &on_grid);
   if (
     res.status == TileResult::Status::no_time ||
-    res.status == TileResult::Status::no_field)
+    res.status == TileResult::Status::no_field ||
+    res.status == TileResult::Status::ambiguous)
   {
     return res;
   }

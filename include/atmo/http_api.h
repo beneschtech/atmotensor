@@ -25,6 +25,7 @@
 #include <thread>
 
 #include "atmo/fcgi.h"
+#include "atmo/grib_api.h"
 #include "atmo/query.h"
 #include "atmo/snapshot.h"
 
@@ -38,14 +39,17 @@ std::map<std::string, std::string> parse_query_string(std::string_view qs);
 class QueryApi
 {
  public:
-  // `loader` (and `grib_cache`, if given) must outlive the API.  Up to
-  // `pinned_cache` older snapshots stay open for ?snapshot=.  Without a
-  // GRIB cache, GRIB-native data is listed but samples as null.
+  // `loader` (and `grib_api`, if given) must outlive the API.  Up to
+  // `pinned_cache` older snapshots stay open for ?snapshot=.  With
+  // `grib_api` (T17), /v1/grib/* is served from the grid catalog,
+  // independent of snapshots, and so are the gridded parts of /v1/meta,
+  // /v1/point and /v1/tiles (T17c); without it those use the snapshot's
+  // field files and /v1/grib/* is 404.
   QueryApi(
     std::filesystem::path root,
     SnapshotLoader& loader,
     std::size_t pinned_cache = 4,
-    GribCache* grib_cache = nullptr);
+    const GribApi* grib_api = nullptr);
   ~QueryApi();
 
   // Thread-safe.
@@ -64,12 +68,13 @@ class QueryApi
     const std::string& path,
     const std::map<std::string, std::string>& q,
     const fcgi::Request& req,
-    const View& v) const;
+    const View& v,
+    const FieldStore& store) const;
 
   std::filesystem::path root_;
   SnapshotLoader& loader_;
   std::size_t pinned_cache_;
-  GribCache* grib_cache_;
+  const GribApi* grib_api_;
   mutable std::mutex mu_;
   mutable View current_;
   mutable std::list<View> pinned_;  // most recently used first

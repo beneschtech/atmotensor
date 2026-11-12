@@ -1,11 +1,11 @@
 // GRIB-native gridded store (T10c, Q10): GRIB2 files are kept exactly as
-// published, under data/grib/<model>/<run YYYYmmddHH>/<file>, next to an
-// index sidecar (<file>.idx.json) listing every usable message: byte range,
-// content hash, variable, level, forecast hour, grid.  Queries decode the
-// messages they need on demand through a process-wide GribCache.
+// published, under data/grib/<model>/<run YYYYmmddHH>/<file>; the grid
+// catalog (D13, catalog.h) lists every message (the T10c .idx.json
+// sidecars were removed in T18).  Queries decode the messages they need on
+// demand through a process-wide GribCache.
 //
-// The index and the cache do not need eccodes; ingest (index_grib) and the
-// decoder (grib_decoder) do and live in grib.h.
+// The cache does not need eccodes; the decoder (grib_decoder) does and
+// lives in grib.h.
 //
 // Cache (Chris's design, Q10): a map from message hash to the decoded
 // message (values in registry units and normalised grid order, plus the
@@ -39,7 +39,12 @@
 namespace atmo
 {
 
-// One usable message of a GRIB file.
+// GribIndexEntry::info.param_id of a grid catalog message (T17): decode in
+// the message's native GRIB units, whatever its parameter (0 is not a
+// registry code).
+constexpr std::uint16_t kNativeParam = 0;
+
+// One message of a GRIB file to decode (the cache's request).
 struct GribIndexEntry
 {
   std::uint64_t offset = 0;  // byte offset of the message in the file
@@ -52,30 +57,6 @@ struct GribIndexEntry
   bool operator==(const GribIndexEntry&) const = default;
 };
 
-struct GribIndex
-{
-  static constexpr const char* kFormat = "atmo-grib-index";
-  static constexpr int kVersion = 1;
-
-  std::string model;
-  std::int64_t run_s = 0;
-  std::string grib;        // the GRIB file, relative to the store root
-  std::uint64_t size = 0;  // its size in bytes
-  std::uint64_t messages_total = 0;  // usable or not
-  std::vector<GribIndexEntry> entries;
-  std::vector<std::pair<std::uint64_t, std::string>> skipped;  // (msg, why)
-
-  bool operator==(const GribIndex&) const = default;
-
-  // Entries inside the file, (fhr, field) unique, one grid per fhr.
-  // std::invalid_argument otherwise.
-  void validate() const;
-  nlohmann::json to_json() const;
-  std::string to_text() const;
-  static GribIndex from_json(const nlohmann::json& j);
-  static GribIndex from_text(std::string_view text);
-};
-
 // A decoded message: values in the registry's units, normalised grid order
 // (index = j*ni + i), NaN = missing; the coordinates are the grid's (one
 // shared copy per grid, not per message).
@@ -84,6 +65,7 @@ struct GribMessageData
   std::uint64_t hash = 0;
   std::shared_ptr<const Grid> grid;
   std::vector<double> values;
+  bool uv_relative_to_grid = false;  // set for native (catalog) decodes
   // Unix seconds of the last get(); updated by the cache.
   mutable std::atomic<std::int64_t> last_accessed{0};
 

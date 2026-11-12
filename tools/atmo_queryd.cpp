@@ -4,7 +4,10 @@
 //
 //   atmo_queryd --root /opt/atmotensor/data [--socket /run/atmo/query.sock]
 //               [--tcp-port N] [--threads N] [--queue N]
-//               [--cache-mb N] [--rss-limit-mb N]
+//               [--cache-mb N] [--rss-limit-mb N] [--catalog CONFIG]
+//
+// --catalog (T17, D13): serve /v1/grib/* from the grid catalog in MySQL
+// (CONFIG = connection file, catalog.h; a read-only user is enough).
 //
 // GRIB-native data is decoded on demand into a cache of --cache-mb
 // (default 4096); when the process RSS exceeds --rss-limit-mb (default
@@ -22,6 +25,9 @@
 #include <exception>
 #include <string>
 
+#include <memory>
+
+#include "atmo/catalog.h"
 #include "atmo/fcgi.h"
 #ifdef ATMO_HAVE_ECCODES
 #include "atmo/grib.h"
@@ -44,7 +50,9 @@ int usage()
     stderr,
     "usage: atmo_queryd --root DIR [--socket PATH] [--tcp-port N]\n"
     "                   [--threads N] [--queue N] [--cache-mb N]\n"
-    "                   [--rss-limit-mb N]\n"
+    "                   [--rss-limit-mb N] [--catalog CONFIG]\n"
+    "  --catalog serves /v1/grib/* from the grid catalog (MySQL\n"
+    "  connection file CONFIG).\n"
     "  --socket defaults to /run/atmo/query.sock; --tcp-port listens on\n"
     "  127.0.0.1 as well (0 = no TCP).\n");
   return 2;
@@ -54,14 +62,23 @@ int usage()
 
 int main(int argc, char** argv)
 {
-  std::string root;
+  std::string root, catalog;
   long cache_mb = 4096, rss_mb = -1;
   atmo::fcgi::ServerOptions opt;
   opt.unix_path = "/run/atmo/query.sock";
   for (int i = 1; i < argc; ++i)
   {
     const std::string a = argv[i];
-    auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
+    bool missing = false;
+    auto next = [&]() -> std::string
+    {
+      if (i + 1 >= argc || argv[i + 1][0] == '-')
+      {
+        missing = true;  // "--catalog" with no file must not be ignored
+        return "";
+      }
+      return argv[++i];
+    };
     if (a == "--root")
       root = next();
     else if (a == "--socket")
@@ -80,8 +97,15 @@ int main(int argc, char** argv)
       cache_mb = std::atol(next().c_str());
     else if (a == "--rss-limit-mb")
       rss_mb = std::atol(next().c_str());
+    else if (a == "--catalog")
+      catalog = next();
     else
       return usage();
+    if (missing)
+    {
+      std::fprintf(stderr, "atmo_queryd: %s needs a value\n", a.c_str());
+      return usage();
+    }
   }
   if (rss_mb < 0)
   {
@@ -114,7 +138,25 @@ int main(int argc, char** argv)
 #else
     atmo::GribCache cache(limits, {});  // GRIB-native data samples as null
 #endif
-    atmo::QueryApi api(root, loader, 4, &cache);
+    std::unique_ptr<atmo::CatalogQuery> reader;
+    std::unique_ptr<atmo::GribApi> grib_api;
+    if (!catalog.empty())
+    {
+#ifdef ATMO_HAVE_MYSQL
+      reader = std::make_unique<atmo::CatalogReader>(
+        atmo::CatalogConfig::from_file(catalog));
+      // ATMO_HAVE_MYSQL implies eccodes (atmo_catalog needs both).
+      grib_api = std::make_unique<atmo::GribApi>(
+        root, *reader, &cache, atmo::grib_values);
+      log(
+        "grid catalog: generation " +
+        std::to_string(reader->tables()->generation));
+#else
+      log("built without the grid catalog (ATMO_WITH_MYSQL); --catalog");
+      return 2;
+#endif
+    }
+    atmo::QueryApi api(root, loader, 4, grib_api.get());
     atmo::fcgi::Server server(
       opt, [&api](const atmo::fcgi::Request& r) { return api.handle(r); });
     server.start();

@@ -37,12 +37,14 @@ endfunction()
 # compilers/targets that have FMA); it is PUBLIC because templates such as
 # KdTree4 and embed() are compiled in the users' translation units.
 add_library(atmo STATIC
+  src/catalog.cpp
   src/colormap.cpp
   src/crc32.cpp
   src/fcgi.cpp
   src/fieldfile.cpp
   src/geo.cpp
   src/grid.cpp
+  src/grib_api.cpp
   src/gribstore.cpp
   src/gridstore.cpp
   src/http_api.cpp
@@ -159,18 +161,74 @@ if(NOT ATMO_WITH_ECCODES STREQUAL "OFF")
   endif()
 endif()
 if(ATMO_ECCODES_TARGET)
-  target_sources(atmo PRIVATE src/grib.cpp)
+  target_sources(atmo PRIVATE src/grib.cpp src/gribsig.cpp)
   target_link_libraries(atmo PUBLIC ${ATMO_ECCODES_TARGET})
   target_compile_definitions(atmo PUBLIC ATMO_HAVE_ECCODES=1)
   # Development tool until the ingest daemon exists.
   add_executable(atmo_grib_ingest tools/atmo_grib_ingest.cpp)
   target_link_libraries(atmo_grib_ingest PRIVATE atmo::atmo)
   atmo_target_defaults(atmo_grib_ingest)
+  # Deny-list validation over real files (T15).
+  add_executable(atmo_grib_sigcheck tools/atmo_grib_sigcheck.cpp)
+  target_link_libraries(atmo_grib_sigcheck PRIVATE atmo::atmo)
+  atmo_target_defaults(atmo_grib_sigcheck)
+endif()
+
+# Grid catalog in MySQL (T16, D13): MariaDB Connector/C or MySQL's
+# libmysqlclient (same C API).  Only the daemons and tools link it.
+set(ATMO_WITH_MYSQL AUTO CACHE STRING "Grid catalog (MySQL/MariaDB client): AUTO|ON|OFF")
+set_property(CACHE ATMO_WITH_MYSQL PROPERTY STRINGS AUTO ON OFF)
+set(ATMO_MYSQL_TARGET "")
+if(NOT ATMO_WITH_MYSQL STREQUAL "OFF")
+  find_package(PkgConfig QUIET)
+  if(PKG_CONFIG_FOUND)
+    pkg_check_modules(ATMO_MYSQL_PC QUIET IMPORTED_TARGET libmariadb)
+    if(NOT ATMO_MYSQL_PC_FOUND)
+      pkg_check_modules(ATMO_MYSQL_PC QUIET IMPORTED_TARGET mysqlclient)
+    endif()
+  endif()
+  if(ATMO_MYSQL_PC_FOUND)
+    set(ATMO_MYSQL_TARGET PkgConfig::ATMO_MYSQL_PC)
+    message(STATUS "AtmoTensor: catalog client library ${ATMO_MYSQL_PC_LIBRARIES} (pkg-config)")
+  else()
+    find_path(ATMO_MYSQL_INCLUDE_DIR mysql.h PATH_SUFFIXES mariadb mysql)
+    find_library(ATMO_MYSQL_LIBRARY NAMES mariadb mysqlclient)
+    if(ATMO_MYSQL_INCLUDE_DIR AND ATMO_MYSQL_LIBRARY)
+      add_library(atmo_mysql INTERFACE IMPORTED)
+      target_include_directories(atmo_mysql INTERFACE ${ATMO_MYSQL_INCLUDE_DIR})
+      target_link_libraries(atmo_mysql INTERFACE ${ATMO_MYSQL_LIBRARY})
+      set(ATMO_MYSQL_TARGET atmo_mysql)
+      message(STATUS "AtmoTensor: catalog client library ${ATMO_MYSQL_LIBRARY}")
+    endif()
+  endif()
+  if(NOT ATMO_MYSQL_TARGET)
+    if(ATMO_WITH_MYSQL STREQUAL "ON")
+      message(FATAL_ERROR "ATMO_WITH_MYSQL=ON but no MariaDB/MySQL client library was found")
+    endif()
+    message(STATUS "AtmoTensor: no MySQL client library, grid catalog disabled")
+  endif()
+endif()
+# The writer uses the signature code, so it also needs eccodes.
+if(ATMO_MYSQL_TARGET AND NOT ATMO_ECCODES_TARGET)
+  message(STATUS "AtmoTensor: grid catalog needs eccodes too, disabled")
+  set(ATMO_MYSQL_TARGET "")
+endif()
+if(ATMO_MYSQL_TARGET)
+  add_library(atmo_catalog STATIC src/catalog_mysql.cpp)
+  add_library(atmo::catalog ALIAS atmo_catalog)
+  target_link_libraries(atmo_catalog PUBLIC atmo::atmo PRIVATE ${ATMO_MYSQL_TARGET})
+  target_compile_definitions(atmo_catalog PUBLIC ATMO_HAVE_MYSQL=1)
+  atmo_target_defaults(atmo_catalog)
+  if(TARGET atmo_grib_ingest)
+    target_link_libraries(atmo_grib_ingest PRIVATE atmo::catalog)
+  endif()
+  set(ATMO_QUERYD_CATALOG TRUE)
 endif()
 
 # Shared test/bench scaffolding: harness and synthetic Lambert grid.
 if(ATMO_BUILD_TESTS OR ATMO_BUILD_BENCH)
-  add_library(atmo_testkit STATIC tests/check.cpp tests/lambert.cpp)
+  add_library(atmo_testkit STATIC tests/check.cpp tests/lambert.cpp
+    tests/fake_catalog.cpp)
   target_include_directories(atmo_testkit PUBLIC tests)
   target_link_libraries(atmo_testkit PUBLIC atmo::atmo)
   atmo_target_defaults(atmo_testkit)
@@ -179,6 +237,9 @@ endif()
 # Query daemon (T10).
 add_executable(atmo_queryd tools/atmo_queryd.cpp)
 target_link_libraries(atmo_queryd PRIVATE atmo::atmo)
+if(ATMO_QUERYD_CATALOG)
+  target_link_libraries(atmo_queryd PRIVATE atmo::catalog)
+endif()
 atmo_target_defaults(atmo_queryd)
 
 if(ATMO_BUILD_TESTS)
@@ -194,6 +255,27 @@ if(ATMO_BUILD_TESTS)
     target_link_libraries(test_grib PRIVATE atmo_testkit)
     atmo_target_defaults(test_grib)
     add_test(NAME grib COMMAND test_grib)
+    add_executable(test_grib_api tests/test_grib_api.cpp)
+    target_link_libraries(test_grib_api PRIVATE atmo_testkit)
+    atmo_target_defaults(test_grib_api)
+    add_test(NAME grib_api COMMAND test_grib_api)
+    add_executable(test_gribsig tests/test_gribsig.cpp)
+    target_link_libraries(test_gribsig PRIVATE atmo_testkit)
+    atmo_target_defaults(test_gribsig)
+    add_test(NAME gribsig COMMAND test_gribsig)
+    # eccodes leaks on its unknown-template error path (see the file).
+    set_tests_properties(gribsig PROPERTIES ENVIRONMENT
+      "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan_eccodes.supp")
+    # Needs a throwaway database (tests/catalog_testdb.sh); skipped (77)
+    # without ATMO_TEST_CATALOG.
+    if(ATMO_MYSQL_TARGET)
+      add_executable(test_catalog tests/test_catalog.cpp)
+      target_link_libraries(test_catalog PRIVATE atmo_testkit atmo::catalog)
+      atmo_target_defaults(test_catalog)
+      add_test(NAME catalog COMMAND test_catalog)
+      set_tests_properties(catalog PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+        "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan_eccodes.supp")
+    endif()
   endif()
 endif()
 

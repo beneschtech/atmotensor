@@ -13,7 +13,7 @@ std::size_t RetentionPolicy::runs_for(std::string_view model) const
 
 bool RetentionResult::changed() const
 {
-  return segments_expired + fields_expired + grids_expired > 0;
+  return segments_expired + fields_expired > 0;
 }
 
 RetentionResult apply_retention(
@@ -45,10 +45,6 @@ RetentionResult apply_retention(
   {
     runs[f.model].insert(f.run_s);
   }
-  for (const auto& g : m.gribs)
-  {
-    runs[g.model].insert(g.run_s);
-  }
   std::map<std::string, std::set<std::int64_t>> kept_runs;
   for (const auto& [model, times] : runs)
   {
@@ -60,46 +56,19 @@ RetentionResult apply_retention(
     }
   }
   out.fields.clear();
-  std::set<GridKey> used;
   for (const auto& f : m.fields)
   {
     if (kept_runs[f.model].count(f.run_s))
     {
       out.fields.push_back(f);
-      used.insert(f.grid_key);
     }
     else
     {
       ++r.fields_expired;
     }
   }
-
-  out.gribs.clear();
-  for (const auto& g : m.gribs)
-  {
-    if (kept_runs[g.model].count(g.run_s))
-    {
-      out.gribs.push_back(g);
-      used.insert(g.grids.begin(), g.grids.end());
-    }
-    else
-    {
-      ++r.fields_expired;
-    }
-  }
-
-  out.grids.clear();
-  for (const auto& g : m.grids)
-  {
-    if (used.count(g.key))
-    {
-      out.grids.push_back(g);
-    }
-    else
-    {
-      ++r.grids_expired;
-    }
-  }
+  // Grids never expire here: grids/ is shared with the grid catalog (D13),
+  // which the manifest cannot see (T18, Q23).
   return r;
 }
 

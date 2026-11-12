@@ -19,14 +19,99 @@ The API the web app and customers use is specified in
 
 ## 2. Put data in (until the ingest daemon exists)
 
-    ./build-cmake/atmo_grib_ingest --root /opt/atmotensor/data --model gfs \
-        --seed-sources /opt/atmotensor/ingest/grib/gfs.t18z.pgrb2.0p25.f000
+First manifest (observation source classes; the web app exports
+`data/config/sources.json` later):
 
-Each file is kept as published (hard-linked into `data/grib/<model>/<run>/`,
-so no extra disk) next to a small index; queries decode messages on demand
-into the daemon's cache. `--seed-sources` writes the default observation
-source classes to `data/config/sources.json` once; later the web app
-exports that file.
+    ./build-cmake/atmo_grib_ingest --root /opt/atmotensor/data --seed-sources
+
+GRIB files go into the grid catalog (below). Per downloaded file (one
+forecast hour), ingest and retention in one call:
+
+    ./build-cmake/atmo_grib_ingest --root /opt/atmotensor/data --model gfs \
+        --catalog /opt/atmotensor/etc/catalog.json --expire --keep 5 \
+        /opt/atmotensor/ingest/grib/gfs.t18z.pgrb2.0p25.f003
+
+- The file is hard-linked into `data/grib/<model>/<run YYYYmmddHH>/` (no
+  extra disk; download into `/opt/atmotensor/ingest` or `tmp`, same
+  volume) and every message is catalogued in one transaction. The
+  download can be deleted afterwards. `--model` only names that folder:
+  the catalog's model comes from the GRIB (centre, subcentre, process id)
+  and the web app's aliases.
+- Then the newest K base times per model grid are kept, older runs and
+  their files deleted. K counts a run that is still arriving, so use one
+  more than the complete runs wanted (`--keep 5` = 4 complete + the
+  current one); `--keep-model gfs_0.25p=3` overrides per model.
+- The query daemon sees the new data within about a second (it polls the
+  catalog generation); no reload or restart.
+- Calls may run in parallel (they take turns on the generation row).
+  Re-sending an identical file is harmless; a different file under a name
+  already used in that run folder is refused.
+- New kind of data (a new model or process id): in the web app, alias it
+  if it belongs to an existing model (GFS f000 is process 81, the
+  forecast hours 96) and run `--realias` once; give the model grid a
+  short `api_name`; re-run `app:grib:seed-common-names`.
+
+**Upgrading a store from before T18** (manifest version 1 with a `gribs`
+list, as on this box until 2026-11-11): the new build reads it, retires
+the `.idx.json` sidecars (unlinked by gc after the grace period) and no
+longer serves those GRIB files unless they are catalogued. Catalogue them
+in place, then run the query daemon with `--catalog`:
+
+    find /opt/atmotensor/data/grib -name '*.idx.json' -prune -o -type f -print |
+      while read f; do ./build-cmake/atmo_grib_ingest --root /opt/atmotensor/data \
+        --model "$(echo "$f" | cut -d/ -f6)" --catalog /opt/atmotensor/etc/catalog.json "$f"; done
+
+### Grid catalog (D13)
+
+The catalog lives in the web app's MySQL database (`grib_*` tables, created
+by its Doctrine migrations: `php bin/console doctrine:migrations:migrate`
+in `../web`). The engine connects with its own settings file, readable only
+by the service user (it refuses anything group/world-readable):
+
+    install -m 600 -o atmo /dev/null /opt/atmotensor/etc/catalog.json
+    # {"host": "127.0.0.1", "port": 3306, "user": "atmo_ingest",
+    #  "password": "...", "database": "atmotensor"}
+
+Ingest needs INSERT/UPDATE/DELETE/SELECT on `grib_*` plus CREATE TEMPORARY
+TABLES on the database (it stages each file's messages); the query daemon only
+SELECT (give it a separate read-only user and file). Then:
+
+    ./build-cmake/atmo_grib_ingest --root /opt/atmotensor/data --model gfs \
+        --catalog /opt/atmotensor/etc/catalog.json FILE...
+    # query daemon: add --catalog /opt/atmotensor/etc/catalog-ro.json
+
+Every message of the file is catalogued (one transaction per file). With
+`--catalog`, the query daemon serves `/v1/point`, `/v1/tiles`, `/v1/meta`
+and `/v1/grib/*` from the catalog (model names = the web app's
+`api_name`, field names = common names; see the API doc); it still needs
+a published manifest for observations.
+
+The catalog needs a MySQL 8.0.19+ server (schema version 2: run the web
+app's migrations first; the engine refuses any other version).
+
+Model aliases (QUESTIONS.md Q18a): after adding, changing or removing a
+`grib_model_alias` row in the web app, move what is already catalogued:
+
+    ./build-cmake/atmo_grib_ingest --catalog /opt/atmotensor/etc/catalog.json --realias
+
+New files use the aliases at ingest anyway. Common names for `/v1/point`
+field specs (`air_temperature@2m`) come from the variable registry
+(Q19c, Q21a); re-run after new models were ingested:
+
+    (cd ../web && php bin/console app:grib:seed-common-names)
+
+### eccodes is pinned (Q18c)
+
+Parameter signatures are built from eccodes' key names, so eccodes must
+not change with routine updates. Hold the packages (2.45.0 at the time
+of writing):
+
+    sudo apt-mark hold libeccodes0 libeccodes-dev libeccodes-data libeccodes-tools
+
+An upgrade is a planned step: run `atmo_grib_sigcheck --all` over the
+stored files before and after (`apt-mark unhold`, upgrade, rebuild); if
+any signature or name changed, bump `kSignatureVersion` (gribsig.h) and
+re-ingest, as for a deny-list change.
 
 ## 3. Query daemon (systemd)
 

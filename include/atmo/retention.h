@@ -31,7 +31,6 @@ struct RetentionResult
   Manifest manifest;  // `m` without the expired entries
   std::size_t segments_expired = 0;
   std::size_t fields_expired = 0;
-  std::size_t grids_expired = 0;
   bool changed() const;
 };
 
@@ -39,10 +38,10 @@ struct RetentionResult
 //   * a segment expires when bucket_start + bucket_seconds (its own bucket
 //     length) < now - retain_seconds of its source class, so every version
 //     in a bucket expires together;
-//   * fields and GRIB files: per model, the newest K distinct run times
-//     stay (all their forecast hours), older runs expire whole (both count
-//     in fields_expired);
-//   * a grid that no remaining field uses expires.
+//   * fields: per model, the newest K distinct run times stay (all their
+//     forecast hours), older runs expire whole;
+//   * grids never expire: grids/ is shared with the grid catalog (D13,
+//     T18), whose runs Catalog::expire() retires (catalog.h).
 // Stations, seq, sources and next_receipt_seq are untouched.
 RetentionResult apply_retention(
   const Manifest& m,

@@ -35,10 +35,11 @@ struct TileResult
 {
   enum class Status
   {
-    ok,        // at least one pixel on the grid
-    empty,     // tile outside the grid: fully transparent PNG
-    no_time,   // model has no data for (run, fhr)
-    no_field,  // field not stored at that time
+    ok,         // at least one pixel on the grid
+    empty,      // tile outside the grid: fully transparent PNG
+    no_time,    // model has no data for (run, fhr)
+    no_field,   // field not stored at that time
+    ambiguous,  // several signatures of the parameter (catalog, Q19b)
   };
   Status status = Status::ok;
   std::string png;  // set for ok and empty

@@ -53,6 +53,10 @@ class TempFile;
 
 // FieldInfo::flags
 constexpr std::uint8_t kFieldGridRelative = 1u << 0;  // u/v along +i/+j
+// In memory only (never written to files): a FieldStore lists a field
+// with this flag when it exists more than once at that time and level and
+// cannot choose (grid catalog: two signatures of one parameter, Q19b).
+constexpr std::uint8_t kFieldAmbiguous = 1u << 7;
 
 struct FieldInfo
 {

@@ -33,6 +33,7 @@
 #include <string>
 #include <vector>
 
+#include "atmo/catalog.h"
 #include "atmo/fieldfile.h"
 #include "atmo/gribstore.h"
 #include "atmo/grid.h"
@@ -126,35 +127,34 @@ GribIngestResult ingest_grib(
 // std::invalid_argument if `m` already lists that field file.
 void add_to_manifest(Manifest& m, const GribIngestResult& r);
 
-// ---- GRIB-native store (T10c, Q10; gribstore.h) ---------------------------
+// ---- Grid catalog (T16, D13; catalog.h) ------------------------------------
 
-struct GribNativeResult
-{
-  GribEntry entry;               // for the manifest
-  std::vector<GridEntry> grids;  // grids its messages use
-  GribIndex index;
-};
-
-// Keeps a GRIB2 file as published: indexes its usable messages (same rules
-// as above), hard-links it into root/grib/<model>/<run YYYYmmddHH>/<name>
-// (a copy if `source` is on another filesystem), writes the index sidecar
-// <name>.idx.json, and stores the grids in the GridStore.  The source file
-// is left in place.  Publishing is the caller's job (add_to_manifest).
-// std::runtime_error if the file is unreadable or corrupt, its messages
-// belong to different runs, nothing is usable, or the target exists.
-// std::invalid_argument for bad options.
-GribNativeResult index_grib(
+// Keeps a GRIB2 file as published (hard link into
+// root/grib/<model>/<earliest base time YYYYmmddHH>/<name>; an identical
+// file already there is reused, a different one is an error), describes
+// EVERY message (gribsig.h: signature, time, level, member) and stores
+// each supported grid in the GridStore.  Nothing is skipped for want of a
+// name: unknown parameters, other templates, sub-hourly steps and
+// statistical intervals of any kind are all returned; only non-GRIB2
+// messages are listed in `skipped`.  Unsupported grids and undecodable
+// templates are returned with flags (catalog.h).  Writes no sidecar and no
+// manifest entry: the result goes to Catalog::ingest().
+// std::runtime_error if the file is unreadable or truncated, or holds no
+// GRIB2 message.  std::invalid_argument for a bad model name.
+CatalogFile catalog_grib(
   const std::filesystem::path& root,
   const std::filesystem::path& source,
-  const GribIngestOptions& options);
-
-// Adds the entry and any grids not listed yet.  std::invalid_argument if
-// `m` already lists that file.
-void add_to_manifest(Manifest& m, const GribNativeResult& r);
+  const std::string& model);
 
 // Decoder for GribCache: reads the message at its offset, checks it still
 // hashes to the indexed value, decodes values into registry units and
 // normalised order.
 GribDecoder grib_decoder();
+
+// Every value of one GRIB2 message in the message's own point order (no
+// scan-mode normalisation, any grid type), native units, NaN where the
+// bitmap says missing (/v1/grib/messages/{id}/values, Q21g).
+// std::runtime_error if eccodes cannot decode it.
+std::vector<double> grib_values(const void* msg, std::size_t len);
 
 }  // namespace atmo

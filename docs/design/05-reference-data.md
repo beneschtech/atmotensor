@@ -3,6 +3,10 @@
 Decision D10, option B (2026-11-05). This is the contract between the
 Symfony web app (`../web`) and the engine; keep both sides in step with it.
 
+> Since D13 (2026-11-11, 07-grib-catalog.md) this contract covers
+> observations-side reference data only. The grid catalog tables are read
+> and written by the engine directly.
+
 ## Who owns what
 
 - **The web app owns MySQL.** The schema is defined by its Doctrine

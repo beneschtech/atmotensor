@@ -26,7 +26,6 @@
 #include <vector>
 
 #include "atmo/fieldfile.h"
-#include "atmo/gribstore.h"
 #include "atmo/grid.h"
 #include "atmo/manifest.h"
 #include "atmo/obs_index.h"
@@ -44,7 +43,6 @@ class Snapshot
   using GridPtr = std::shared_ptr<const Grid>;
   using StationsPtr = std::shared_ptr<const StationTable>;
   using FieldPtr = std::shared_ptr<const FieldFile>;
-  using GribIndexPtr = std::shared_ptr<const GribIndex>;
 
   // Opens everything `m` names under `root`.  `previous` (may be null)
   // donates mappings of unchanged files.  std::runtime_error if a file is
@@ -70,12 +68,6 @@ class Snapshot
     std::string_view model,
     std::int64_t run_s,
     std::uint32_t fhr) const;
-  // GRIB indexes, parallel to manifest().gribs.  Each was checked against
-  // its entry (index CRC, model, run, GRIB file size, grids).
-  const std::vector<GribIndexPtr>& grib_indexes() const
-  {
-    return grib_indexes_;
-  }
   // In manifest order.
   const std::vector<SegPtr>& segments() const { return segments_; }
   const ObsIndex& obs() const { return *obs_; }
@@ -90,7 +82,6 @@ class Snapshot
   std::map<GridKey, GridPtr> grids_;
   std::map<std::tuple<std::string, std::int64_t, std::uint32_t>, FieldPtr>
     fields_;
-  std::vector<GribIndexPtr> grib_indexes_;
   std::vector<SegPtr> segments_;
   std::unique_ptr<ObsIndex> obs_;
   std::size_t opened_ = 0;
