@@ -249,6 +249,9 @@ class CatalogFieldStore : public FieldStore
   std::string field_name(std::uint64_t signature_id) const;
   // Common names of a signature's parameter.
   std::vector<std::string> common_names(std::uint64_t signature_id) const;
+  // Signature ids of a parameter id (as resolve_field() returns it), sorted
+  // (derived products match messages by signature, T21).
+  std::vector<std::uint64_t> signatures_of(std::uint16_t param) const;
 
  private:
   struct Param

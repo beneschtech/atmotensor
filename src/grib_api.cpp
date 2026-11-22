@@ -1370,10 +1370,38 @@ CatalogFieldStore::CatalogFieldStore(
       params_[it->second - 1].common.push_back(lower(c.name));
     }
   }
+  // Display names must be unique, or a listed name would resolve to
+  // another parameter: a parameter without common names keeps its
+  // normalised name unless that is a common name or shared with other
+  // unnamed parameters; then it gets a stable suffix from its id.
+  std::set<std::string> taken;
+  std::map<std::string, int> unnamed;
   for (auto& p : params_)
   {
     std::sort(p.common.begin(), p.common.end());
-    p.info.name = p.common.empty() ? p.normalised : p.common.front();
+    taken.insert(p.common.begin(), p.common.end());
+    if (p.common.empty())
+    {
+      ++unnamed[p.normalised];
+    }
+  }
+  for (std::size_t k = 0; k < params_.size(); ++k)
+  {
+    Param& p = params_[k];
+    if (!p.common.empty())
+    {
+      p.info.name = p.common.front();
+    }
+    else if (taken.count(p.normalised) || unnamed[p.normalised] > 1)
+    {
+      p.info.name =
+        p.normalised + (p.parameter_id ? "_p" + std::to_string(*p.parameter_id)
+                                       : "_s" + std::to_string(k + 1));
+    }
+    else
+    {
+      p.info.name = p.normalised;
+    }
   }
   for (const auto& mg : t.model_grids)
   {
@@ -1657,6 +1685,20 @@ std::vector<std::string> CatalogFieldStore::common_names(
                                 : params_[it->second - 1].common;
 }
 
+std::vector<std::uint64_t> CatalogFieldStore::signatures_of(
+  std::uint16_t param) const
+{
+  std::vector<std::uint64_t> out;
+  for (const auto& [sig, id] : sig_param_)
+  {
+    if (id == param)
+    {
+      out.push_back(sig);
+    }
+  }
+  return out;  // sig_param_ is a map: already sorted
+}
+
 ResolvedName CatalogFieldStore::resolve_field(std::string_view name) const
 {
   const std::string want = lower(name);
@@ -1667,6 +1709,15 @@ ResolvedName CatalogFieldStore::resolve_field(std::string_view name) const
   {
     const auto& c = params_[k].common;
     if (std::find(c.begin(), c.end(), want) != c.end())
+    {
+      return found(static_cast<std::uint16_t>(k + 1), false);
+    }
+  }
+  for (std::size_t k = 0; k < params_.size(); ++k)
+  {
+    if (
+      params_[k].common.empty() && params_[k].info.name == want &&
+      params_[k].info.name != params_[k].normalised)
     {
       return found(static_cast<std::uint16_t>(k + 1), false);
     }

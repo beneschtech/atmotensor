@@ -563,6 +563,46 @@ TEST(db_ingest_writes_the_hierarchy)
       "0") == key_hex(f.messages[0].content_hash));
 }
 
+TEST(db_parameter_matches_by_name_despite_changed_units)
+{
+  // The web app may change a parameter's units (seed-common-names copies
+  // the registry's); new signatures must still link to that row, not to a
+  // second "Temperature" the common name does not reach.
+  for (const bool both : {false, true})
+  {
+    auto db = open_db();
+    if (!db)
+    {
+      return;
+    }
+    db->query(
+      "INSERT INTO grib_parameter (short_name, name, units, si_scale, "
+      "si_offset, origin) VALUES ('', 'Temperature', 'degC', 1, -273.15, "
+      "'eccodes')");
+    if (both)
+    {
+      // Two rows with the name: the one with eccodes' units wins.
+      db->query(
+        "INSERT INTO grib_parameter (short_name, name, units, si_scale, "
+        "si_offset, origin) VALUES ('', 'Temperature', 'K', 1, 0, "
+        "'eccodes')");
+    }
+    Fixture fx;
+    db->ingest(catalog_grib(fx.root, fx.file, "test"));
+    CHECK(
+      one(
+        *db,
+        "SELECT COUNT(*) FROM grib_parameter WHERE name = 'Temperature'") ==
+      (both ? "2" : "1"));
+    CHECK(
+      one(
+        *db,
+        "SELECT GROUP_CONCAT(DISTINCT p.units) FROM grib_signature s JOIN "
+        "grib_parameter p ON p.id = s.parameter_id WHERE p.name = "
+        "'Temperature'") == (both ? "K" : "degC"));
+  }
+}
+
 TEST(db_reingest_keeps_ids_and_web_columns)
 {
   auto db = open_db();

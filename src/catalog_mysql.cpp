@@ -452,11 +452,16 @@ CatalogIngestStats Catalog::ingest(const CatalogFile& file)
         // sets grib_parameter.short_name.
         const std::string name = d.q(fit(catalog_parameter_name(*s), 255));
         const std::string units = d.q(fit(catalog_parameter_units(*s), 64));
+        // By name: the web app may have changed a row's units
+        // (app:grib:seed-common-names copies the registry's), and matching
+        // on units too would then make a second row with the same name
+        // that the common name does not reach.  Units only pick between
+        // rows that share a name.
         const auto r = d.rows(
           "SELECT id FROM grib_parameter WHERE origin = 'eccodes' AND "
           "BINARY name = BINARY " +
-          name + " AND BINARY units = BINARY " + units +
-          " ORDER BY id LIMIT 1");
+          name + " ORDER BY BINARY units = BINARY " + units +
+          " DESC, id LIMIT 1");
         if (!r.empty())
         {
           param = *r[0][0];

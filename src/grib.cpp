@@ -1054,3 +1054,189 @@ GribDecoder grib_decoder()
 }
 
 }  // namespace atmo
+
+// ---------------------------------------------------------------------------
+// Derived products: grib_derive (06-derived-products.md "Outputs", T21)
+// ---------------------------------------------------------------------------
+
+namespace atmo
+{
+
+namespace
+{
+
+void derive_check(int err, const char* key)
+{
+  if (err != 0)
+  {
+    throw std::runtime_error(
+      std::string("grib_derive: cannot set ") + key + ": " +
+      codes_get_error_message(err));
+  }
+}
+
+void derive_long(codes_handle* h, const char* key, long v)
+{
+  derive_check(codes_set_long(h, key, v), key);
+}
+
+// A surface value in SI as GRIB2 scale factor + scaled value: the smallest
+// factor 0..9 that represents it exactly enough, within 32-bit range.
+void set_surface(
+  codes_handle* h,
+  const GribLevel& lv,
+  const char* type_key,
+  const char* factor_key,
+  const char* value_key)
+{
+  if (lv.type > 255)
+  {
+    throw std::invalid_argument("grib_derive: level type above 255");
+  }
+  derive_long(h, type_key, static_cast<long>(lv.type));
+  // Zero is written as "missing", as NCEP does for the surface and MSL;
+  // the catalog reads a missing value as 0, so matching is unaffected.
+  if (lv.type == 255 || lv.value == 0.0)
+  {
+    codes_set_missing(h, factor_key);
+    codes_set_missing(h, value_key);
+    return;
+  }
+  if (!std::isfinite(lv.value))
+  {
+    throw std::invalid_argument("grib_derive: level value is not finite");
+  }
+  for (int sf = 0; sf <= 9; ++sf)
+  {
+    const double scaled = lv.value * std::pow(10.0, sf);
+    const double r = std::round(scaled);
+    if (std::fabs(r) > 2147483647.0)
+    {
+      break;
+    }
+    if (std::fabs(scaled - r) <= 1e-9 * std::max(1.0, std::fabs(scaled)))
+    {
+      derive_long(h, factor_key, sf);
+      derive_long(h, value_key, static_cast<long>(r));
+      return;
+    }
+  }
+  throw std::invalid_argument(
+    "grib_derive: level value " + std::to_string(lv.value) +
+    " cannot be encoded");
+}
+
+}  // namespace
+
+std::vector<unsigned char> grib_derive(
+  const void* tmpl,
+  std::size_t len,
+  const GribDeriveSpec& spec,
+  const std::vector<float>& values)
+{
+  if (spec.process_id > 255 || spec.centre > 65535 || spec.subcentre > 65535)
+  {
+    throw std::invalid_argument("grib_derive: centre/process out of range");
+  }
+  if (spec.discipline > 255 || spec.category > 255 || spec.number > 255)
+  {
+    throw std::invalid_argument("grib_derive: parameter out of range");
+  }
+  if (spec.bits < 1 || spec.bits > 32)
+  {
+    throw std::invalid_argument("grib_derive: bits must be 1..32");
+  }
+  if (spec.offset_end_s < 0)
+  {
+    throw std::invalid_argument("grib_derive: negative forecast time");
+  }
+  Handle h(codes_handle_new_from_message_copy(nullptr, tmpl, len));
+  if (!h)
+  {
+    throw std::runtime_error("grib_derive: cannot parse the template");
+  }
+  if (get_long(h.get(), "edition").value_or(0) != 2)
+  {
+    throw std::invalid_argument("grib_derive: template is not GRIB2");
+  }
+  std::string why;
+  const auto gm = grid_meta(h.get(), "template", 0, why);
+  if (!gm)
+  {
+    throw std::invalid_argument("grib_derive: " + why);
+  }
+  const auto perm = permutation(*gm);
+  if (values.size() != perm.size())
+  {
+    throw std::invalid_argument(
+      "grib_derive: " + std::to_string(values.size()) + " values for a " +
+      std::to_string(gm->id.ni) + "x" + std::to_string(gm->id.nj) + " grid");
+  }
+  const long gen_type =
+    get_long(h.get(), "typeOfGeneratingProcess").value_or(2);
+
+  derive_long(h.get(), "centre", static_cast<long>(spec.centre));
+  derive_long(h.get(), "subCentre", static_cast<long>(spec.subcentre));
+  derive_long(h.get(), "discipline", static_cast<long>(spec.discipline));
+  derive_long(h.get(), "productDefinitionTemplateNumber", 0);
+  derive_long(h.get(), "parameterCategory", static_cast<long>(spec.category));
+  derive_long(h.get(), "parameterNumber", static_cast<long>(spec.number));
+  derive_long(h.get(), "typeOfGeneratingProcess", gen_type);
+  derive_long(
+    h.get(), "generatingProcessIdentifier", static_cast<long>(spec.process_id));
+  if (spec.offset_end_s % 3600 == 0)
+  {
+    derive_long(h.get(), "indicatorOfUnitOfTimeRange", 1);
+    derive_long(h.get(), "forecastTime", spec.offset_end_s / 3600);
+  }
+  else
+  {
+    if (spec.offset_end_s % 60 != 0)
+    {
+      throw std::invalid_argument("grib_derive: forecast time not in minutes");
+    }
+    derive_long(h.get(), "indicatorOfUnitOfTimeRange", 0);
+    derive_long(h.get(), "forecastTime", spec.offset_end_s / 60);
+  }
+  set_surface(
+    h.get(), spec.level1, "typeOfFirstFixedSurface",
+    "scaleFactorOfFirstFixedSurface", "scaledValueOfFirstFixedSurface");
+  set_surface(
+    h.get(), spec.level2, "typeOfSecondFixedSurface",
+    "scaleFactorOfSecondFixedSurface", "scaledValueOfSecondFixedSurface");
+
+  std::size_t n1 = std::strlen("grid_simple");
+  derive_check(
+    codes_set_string(h.get(), "packingType", "grid_simple", &n1),
+    "packingType");
+  derive_long(h.get(), "bitsPerValue", spec.bits);
+
+  const std::size_t n = perm.size();
+  std::vector<double> out(n);
+  bool any_missing = false;
+  for (std::size_t k = 0; k < n; ++k)
+  {
+    const float v = values[perm[k]];
+    if (std::isfinite(v))
+    {
+      out[k] = static_cast<double>(v);
+    }
+    else
+    {
+      out[k] = kMissing;
+      any_missing = true;
+    }
+  }
+  derive_check(codes_set_double(h.get(), "missingValue", kMissing), "missing");
+  derive_long(h.get(), "bitmapPresent", any_missing ? 1 : 0);
+  derive_check(
+    codes_set_double_array(h.get(), "values", out.data(), n), "values");
+
+  const void* buf = nullptr;
+  std::size_t blen = 0;
+  derive_check(codes_get_message(h.get(), &buf, &blen), "message");
+  const auto* b = static_cast<const unsigned char*>(buf);
+  return std::vector<unsigned char>(b, b + blen);
+}
+
+}  // namespace atmo

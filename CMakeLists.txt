@@ -54,6 +54,7 @@ add_library(atmo STATIC
   src/obs_index.cpp
   src/obs_segment.cpp
   src/png.cpp
+  src/products.cpp
   src/query.cpp
   src/refdata.cpp
   src/retention.cpp
@@ -214,7 +215,8 @@ if(ATMO_MYSQL_TARGET AND NOT ATMO_ECCODES_TARGET)
   set(ATMO_MYSQL_TARGET "")
 endif()
 if(ATMO_MYSQL_TARGET)
-  add_library(atmo_catalog STATIC src/catalog_mysql.cpp)
+  add_library(atmo_catalog STATIC src/catalog_mysql.cpp src/products_mysql.cpp
+    src/productd.cpp)
   add_library(atmo::catalog ALIAS atmo_catalog)
   target_link_libraries(atmo_catalog PUBLIC atmo::atmo PRIVATE ${ATMO_MYSQL_TARGET})
   target_compile_definitions(atmo_catalog PUBLIC ATMO_HAVE_MYSQL=1)
@@ -223,6 +225,36 @@ if(ATMO_MYSQL_TARGET)
     target_link_libraries(atmo_grib_ingest PRIVATE atmo::catalog)
   endif()
   set(ATMO_QUERYD_CATALOG TRUE)
+endif()
+
+# OpenCL kernels for derived products (T22): any ICD loader (ocl-icd,
+# Khronos); devices come from the installed ICDs (NVIDIA, Intel, PoCL).
+set(ATMO_WITH_OPENCL AUTO CACHE STRING "OpenCL kernels for derived products: AUTO|ON|OFF")
+set_property(CACHE ATMO_WITH_OPENCL PROPERTY STRINGS AUTO ON OFF)
+if(NOT ATMO_WITH_OPENCL STREQUAL "OFF")
+  find_package(OpenCL QUIET)
+  if(OpenCL_FOUND)
+    add_library(atmo_opencl STATIC src/opencl.cpp)
+    add_library(atmo::opencl ALIAS atmo_opencl)
+    target_link_libraries(atmo_opencl PUBLIC atmo::atmo OpenCL::OpenCL)
+    target_compile_definitions(atmo_opencl PUBLIC ATMO_HAVE_OPENCL=1)
+    atmo_target_defaults(atmo_opencl)
+    message(STATUS "AtmoTensor: OpenCL ${OpenCL_VERSION_STRING} for derived product kernels")
+  elseif(ATMO_WITH_OPENCL STREQUAL "ON")
+    message(FATAL_ERROR "ATMO_WITH_OPENCL=ON but no OpenCL loader was found (ocl-icd-opencl-dev)")
+  else()
+    message(STATUS "AtmoTensor: no OpenCL, kernel products disabled")
+  endif()
+endif()
+
+# Derived products daemon (T21, T22).
+if(ATMO_MYSQL_TARGET)
+  add_executable(atmo_productd tools/atmo_productd.cpp)
+  target_link_libraries(atmo_productd PRIVATE atmo::catalog)
+  if(TARGET atmo_opencl)
+    target_link_libraries(atmo_productd PRIVATE atmo::opencl)
+  endif()
+  atmo_target_defaults(atmo_productd)
 endif()
 
 # Shared test/bench scaffolding: harness and synthetic Lambert grid.
@@ -259,6 +291,10 @@ if(ATMO_BUILD_TESTS)
     target_link_libraries(test_grib_api PRIVATE atmo_testkit)
     atmo_target_defaults(test_grib_api)
     add_test(NAME grib_api COMMAND test_grib_api)
+    add_executable(test_products tests/test_products.cpp)
+    target_link_libraries(test_products PRIVATE atmo_testkit)
+    atmo_target_defaults(test_products)
+    add_test(NAME products COMMAND test_products)
     add_executable(test_gribsig tests/test_gribsig.cpp)
     target_link_libraries(test_gribsig PRIVATE atmo_testkit)
     atmo_target_defaults(test_gribsig)
@@ -275,7 +311,26 @@ if(ATMO_BUILD_TESTS)
       add_test(NAME catalog COMMAND test_catalog)
       set_tests_properties(catalog PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
         "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan_eccodes.supp")
+      # atmo_productd end to end on the throwaway database (T21); skipped
+      # (77) without ATMO_TEST_CATALOG.
+      add_executable(test_productd tests/test_productd.cpp)
+      target_link_libraries(test_productd PRIVATE atmo_testkit atmo::catalog)
+      if(TARGET atmo_opencl)
+        target_link_libraries(test_productd PRIVATE atmo::opencl)
+      endif()
+      atmo_target_defaults(test_productd)
+      add_test(NAME productd COMMAND test_productd)
+      set_tests_properties(productd PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+        "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan_eccodes.supp")
     endif()
+  endif()
+  # Kernel ABI and devices (T22); skipped (77) without an OpenCL device.
+  if(TARGET atmo_opencl)
+    add_executable(test_opencl tests/test_opencl.cpp)
+    target_link_libraries(test_opencl PRIVATE atmo_testkit atmo::opencl)
+    atmo_target_defaults(test_opencl)
+    add_test(NAME opencl COMMAND test_opencl)
+    set_tests_properties(opencl PROPERTIES SKIP_RETURN_CODE 77)
   endif()
 endif()
 
@@ -303,3 +358,18 @@ if(ATMO_BUILD_BENCH)
     atmo_target_defaults(bench_${b})
   endforeach()
 endif()
+
+# ---- install (release preset: /opt/atmotensor) ---------------------------------------------
+# Programs to bin, the static libraries to lib. The programs link those
+# statically, so only bin is needed at run time.
+include(GNUInstallDirs)
+foreach(t atmo_queryd atmo_grib_ingest atmo_grib_sigcheck atmo_productd)
+  if(TARGET ${t})
+    install(TARGETS ${t} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+  endif()
+endforeach()
+foreach(t atmo atmo_catalog atmo_opencl)
+  if(TARGET ${t})
+    install(TARGETS ${t} ARCHIVE DESTINATION lib)
+  endif()
+endforeach()

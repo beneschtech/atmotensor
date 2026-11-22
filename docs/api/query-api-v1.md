@@ -122,7 +122,11 @@ unchanged):
   parameter's name lower-cased with spaces as underscores
   (`temperature`, `total_precipitation_3hr`). `/v1/meta` and the
   responses use the common name if the parameter has one, else the
-  normalised name. Units are the parameter's (see the catalog section).
+  normalised name. Listed names are unique: a parameter without a common
+  name whose normalised name is someone's common name, or is shared with
+  another such parameter, is listed as `<normalised>_p<parameter id>`
+  (e.g. `wind_speed_p245`), and that name finds it exactly (Q26). Units
+  are the parameter's (see the catalog section).
 - **Matching** (every name argument, case-insensitive):
   1. an exact name is used silently;
   2. otherwise names *containing* the text are candidates (models: model
