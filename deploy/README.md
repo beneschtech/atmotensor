@@ -129,6 +129,29 @@ It listens on `/run/atmo/query.sock` (group www-data, mode 0660), follows
 new snapshots automatically, drains on `systemctl stop`, re-reads the
 manifest on `systemctl reload`.
 
+## 3b. Derived products daemon (systemd; T21, T22)
+
+`atmo_productd` turns arriving grids into derived products (spec:
+docs/design/06-derived-products.md; definitions are made in the web app
+under /derived).  Needs the web migrations up to Version20261121220000
+(derived schema 2) and, for kernel products, an OpenCL ICD for each device
+(NVIDIA driver for the M40, `intel-opencl-icd` for the iGPU,
+`pocl-opencl-icd` as the CPU fallback; build with `ocl-icd-opencl-dev`).
+
+    clinfo -l                      # what OpenCL sees
+    cp deploy/productd.json /opt/atmotensor/etc/   # edit "devices"
+    ./build-cmake/atmo_productd --config /opt/atmotensor/etc/productd.json --once
+    sudo cp deploy/atmo-productd.service /etc/systemd/system/
+    sudo systemctl daemon-reload && sudo systemctl enable --now atmo-productd
+    journalctl -u atmo-productd -f
+
+`--once` runs one pass and prints what it did (arrivals, jobs, kernel
+builds, failures).  On its very first start the daemon begins at the
+current catalog generation: data already catalogued is processed through
+the products' rebuild requests (the web app sets one when a product is
+created, enabled again or Rebuild is pressed), not as arrivals.  Status is
+on the web app's /arrivals page (heartbeat, job grid per run).
+
 ## 4. nginx
 
 1. Upstream at http level, e.g. `/etc/nginx/conf.d/atmo-upstream.conf`:

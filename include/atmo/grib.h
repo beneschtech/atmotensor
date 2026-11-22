@@ -35,6 +35,7 @@
 
 #include "atmo/catalog.h"
 #include "atmo/fieldfile.h"
+#include "atmo/gribsig.h"
 #include "atmo/gribstore.h"
 #include "atmo/grid.h"
 #include "atmo/manifest.h"
@@ -156,5 +157,36 @@ GribDecoder grib_decoder();
 // bitmap says missing (/v1/grib/messages/{id}/values, Q21g).
 // std::runtime_error if eccodes cannot decode it.
 std::vector<double> grib_values(const void* msg, std::size_t len);
+
+// ---- Derived products (06-derived-products.md "Outputs", T21) --------------
+
+// What a derived field is, for grib_derive().
+struct GribDeriveSpec
+{
+  std::uint32_t centre = 254;  // ours (as LEADS' MFS products)
+  std::uint32_t subcentre = 0;
+  std::uint32_t process_id = 0;  // generatingProcessIdentifier, 1..254
+  std::uint32_t discipline = 0, category = 0, number = 0;
+  GribLevel level1;  // type 255 = missing
+  GribLevel level2;
+  std::int64_t offset_end_s = 0;  // forecast time of the output
+  int bits = 16;                  // simple packing, bits per value (1..32)
+};
+
+// A new GRIB2 message for `values` (normalised order, index j*ni + i, as
+// Grid and the decoders use; NaN = missing -> bitmap), made by cloning
+// `tmpl` (an input message on the same grid: sections 1 and 3 and the
+// reference time are kept) and setting the centre, subcentre, process,
+// parameter, levels and forecast time from `spec`.  The product template
+// becomes 4.0 (instantaneous); packing becomes simple packing with
+// spec.bits.  The values are written back in the template's own scanning
+// order, so the output's section 3 (and grid) is the template's.
+// std::invalid_argument for a bad spec or a value count that does not
+// match the grid; std::runtime_error if eccodes refuses.
+std::vector<unsigned char> grib_derive(
+  const void* tmpl,
+  std::size_t len,
+  const GribDeriveSpec& spec,
+  const std::vector<float>& values);
 
 }  // namespace atmo

@@ -1,0 +1,27 @@
+# systemd unit for the AtmoTensor derived products daemon (T21, T22).
+#   sudo cp deploy/atmo-productd.service /etc/systemd/system/
+#   sudo cp deploy/productd.json /opt/atmotensor/etc/   (edit devices)
+#   sudo systemctl daemon-reload && sudo systemctl enable --now atmo-productd
+# Writes output GRIB files under /opt/atmotensor/data/grib/derived-*/ and the
+# catalog; scratch in /opt/atmotensor/tmp.  Restart=always also brings back
+# an OpenCL device that a runaway kernel disabled (see include/atmo/opencl.h).
+[Unit]
+Description=AtmoTensor derived products daemon
+After=network.target mysql.service
+
+[Service]
+User=cbenesch
+ExecStart=/opt/atmotensor/src/atmotensor/build-cmake/atmo_productd \
+    --config /opt/atmotensor/etc/productd.json
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/atmotensor/data /opt/atmotensor/tmp
+# OpenCL needs the GPU device nodes (/dev/nvidia*, /dev/dri); no PrivateDevices.
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+{
+  "catalog": "/opt/atmotensor/etc/catalog.json",
+  "root": "/opt/atmotensor/data",
+  "tmp": "/opt/atmotensor/tmp",
+  "devices": ["Tesla M40", "Intel", "Portable Computing Language"],
+  "poll_ms": 1000,
+  "job_timeout_s": 600,
+  "max_attempts": 2,
+  "bits": 16,
+  "cache_mb": 512
+}

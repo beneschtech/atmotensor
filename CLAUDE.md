@@ -21,13 +21,22 @@ run `clang-format -i` on every file you touch (never on `third_party/`).
 
 ## Build and test
 
-CMake only (CLion); presets in CMakePresets.json: default, asan, ci.
+CMake only (CLion); presets in CMakePresets.json: default, debug, release,
+asan, ci. debug is for day-to-day work (compile_commands.json); release is
+-O3 -march=native (so its binaries run only on this CPU family) and installs
+the programs to /opt/atmotensor/bin and the static libraries to lib, which
+the systemd units run from.
 
     cmake --preset default && cmake --build --preset default -j
     ctest --preset default
+    cmake --preset debug && cmake --build --preset debug -j
+    cmake --preset release && cmake --build --preset release -j \
+      && ctest --preset release && cmake --install build-cmake-release
     cmake --preset asan && cmake --build --preset asan -j && ctest --preset asan
     ./build-cmake/bench_kdtree; ./build-cmake/bench_grid
     # options: ATMO_SANITIZE ATMO_WERROR ATMO_BUILD_TESTS ATMO_BUILD_BENCH
+    #          ATMO_WITH_OPENCL=AUTO|ON|OFF (derived product kernels; tests
+    #          need a device, e.g. pocl-opencl-icd, else test_opencl = 77)
     #          ATMO_WITH_ECCODES=AUTO|ON|OFF, ECCODES_ROOT=/prefix, ATMO_WITH_ZLIB
     #          ATMO_WITH_MYSQL=AUTO|ON|OFF (grid catalog: libmysqlclient
     #          or libmariadb via pkg-config; server is MySQL 8.0.19+)
@@ -38,6 +47,7 @@ CMake only (CLion); presets in CMakePresets.json: default, asan, ci.
     ./build-cmake/atmo_grib_ingest --root DIR --seed-sources   # first manifest
     ./build-cmake/atmo_grib_ingest --root DIR --model gfs --tiles F.grib2  # T7
     ./build-cmake/atmo_queryd --root DIR --socket /run/atmo/query.sock  # behind nginx
+    ./build-cmake/atmo_productd --config productd.json [--once]  # T21/T22
     # deploy: deploy/README.md (nginx snippet + systemd unit); API contract: docs/api/query-api-v1.md
 
 No Catch2/gtest: tests use the tiny harness in `tests/check.h` (TEST, CHECK,
@@ -133,6 +143,30 @@ and `atmo_testkit` (test harness + Lambert scaffolding) for tests/benches.
   matching); FieldStore::resolve_field/resolve_model/param(id) +
   ParamRole replace registry codes in query.cpp/tiles.cpp (the base
   class keeps the registry behaviour for snapshot stores)
+- `include/atmo/products.h` derived products core (06, T21; no MySQL,
+  eccodes or OpenCL): Product / ProductKernel / ProductInterface as the
+  derived_* tables hold them, built-in processors (wind_speed,
+  wind_direction; ProcessorArgs = arrays in normalised order, the kernel
+  ABI's shape), ProductMatcher (exact by-name input resolution through
+  CatalogFieldStore::signatures_of, same / previous_step / own_previous
+  rules, plan() for arrivals, plan_all() for rebuild requests),
+  KernelExecutor interface
+- `include/atmo/products_db.h` derived_* tables over a Catalog connection
+  (atmo_catalog): definitions, cursor + heartbeat, arrivals by
+  ingest_seq, job insert / requeue / supersede / claim / done / failed,
+  kernel build results, naming of output model grids
+- `include/atmo/productd.h` ProductDaemon: one pass = heartbeat, kernel
+  builds, arrivals -> jobs, rebuild requests, stale requeue, run jobs
+  (decode via GribApi, built-in or kernel, grib_derive() into
+  grib/derived-<process>/<base>/<slug>.fHHH.j<job>.<hash>.grib2,
+  catalog_grib + Catalog::ingest); daemon in `tools/atmo_productd.cpp`
+  (deploy/productd.json, deploy/atmo-productd.service)
+- `include/atmo/opencl.h` (ATMO_WITH_OPENCL, `atmo_opencl` lib)
+  OpenClExecutor: device preference list, program cache per (device,
+  source hash, entry), build-time argument check against the interface
+  (-cl-kernel-arg-info), fall-through to the next device, timeout
+  disables a device until restart; `grib_derive()` (grib.h) writes the
+  output messages
 - `include/atmo/crc32.h`    CRC-32 (zlib-compatible)
 - `include/atmo/source.h`   SourceClass (metric per source class),
   SourceRegistry (JSON config)

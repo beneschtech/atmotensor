@@ -506,6 +506,38 @@ TEST(catalog_store_models_times_and_names)
   CHECK(
     code([&] { st->resolve_field("total_precipitation"); }) ==
     "400 ambiguous_field 0");
+  // Listed names stay unique: both get an id suffix and resolve by it.
+  std::vector<std::uint64_t> tp;
+  for (const auto& sg : fx.cat->edit().signatures)
+  {
+    if (sg.name == "Total precipitation")
+    {
+      tp.push_back(sg.id);  // == its parameter_id here
+    }
+  }
+  CHECK(tp.size() == 2);
+  {
+    const std::string n1 = "total_precipitation_p" + std::to_string(tp[0]);
+    const std::string n2 = "total_precipitation_p" + std::to_string(tp[1]);
+    const ResolvedName r1 = st->resolve_field(n1);
+    const ResolvedName r2 = st->resolve_field(n2);
+    CHECK(!r1.guess && r1.name == n1);
+    CHECK(!r2.guess && r2.name == n2 && r2.param != r1.param);
+  }
+  // A parameter whose normalised name is another one's common name is
+  // listed with the suffix, so its listed name finds it (not the other).
+  fx.cat->edit().common_names.push_back({"total_precipitation", tp[0]});
+  st = fx.api->field_store();
+  {
+    const std::string n2 = "total_precipitation_p" + std::to_string(tp[1]);
+    const ResolvedName c = st->resolve_field("total_precipitation");
+    const ResolvedName r2 = st->resolve_field(n2);
+    CHECK(!c.guess && c.name == "total_precipitation");
+    CHECK(!r2.guess && r2.name == n2 && r2.param != c.param);
+    CHECK(st->param(r2.param).name == n2);
+  }
+  fx.cat->edit().common_names.clear();
+  st = fx.api->field_store();
 
   // Roles come from the GRIB2 numbers of instantaneous signatures.
   CHECK(st->param(t.param).role == ParamRole::other);

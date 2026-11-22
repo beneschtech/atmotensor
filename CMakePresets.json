@@ -1,12 +1,39 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "default",
       "displayName": "RelWithDebInfo",
       "binaryDir": "${sourceDir}/build-cmake",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug (day-to-day work)",
+      "binaryDir": "${sourceDir}/build-cmake-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release (-O3 -march=native), installs to /opt/atmotensor",
+      "binaryDir": "${sourceDir}/build-cmake-release",
+      "installDir": "/opt/atmotensor",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS_RELEASE": "-O3 -march=native -DNDEBUG",
+        "CMAKE_C_FLAGS_RELEASE": "-O3 -march=native -DNDEBUG",
+        "ATMO_BUILD_BENCH": "OFF"
+      }
     },
     {
       "name": "asan",
@@ -23,29 +50,68 @@
       "displayName": "CI (warnings are errors)",
       "inherits": "asan",
       "binaryDir": "${sourceDir}/build-cmake-ci",
-      "cacheVariables": { "ATMO_WERROR": "ON" }
+      "cacheVariables": {
+        "ATMO_WERROR": "ON"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "default", "configurePreset": "default" },
-    { "name": "asan", "configurePreset": "asan" },
-    { "name": "ci", "configurePreset": "ci" }
+    {
+      "name": "default",
+      "configurePreset": "default"
+    },
+    {
+      "name": "debug",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan"
+    },
+    {
+      "name": "ci",
+      "configurePreset": "ci"
+    }
   ],
   "testPresets": [
     {
       "name": "default",
       "configurePreset": "default",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "output": {
+        "outputOnFailure": true
+      }
     },
     {
       "name": "asan",
       "configurePreset": "asan",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     },
     {
       "name": "ci",
       "configurePreset": "ci",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

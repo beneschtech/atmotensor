@@ -624,3 +624,75 @@ Q24 [open] From T19 (web grid picker), 2026-11-11, for the engine side:
        matter for users, the options are a by-id layer kind in the web
        (pinned to one message, no hour stepping) or widening the by-name
        API (member=, minute offsets, level2 in the field spec).
+
+Q25 [open, for review] T21/T22 (atmo_productd), 2026-11-21: choices made
+    while building that 06-derived-products.md did not pin down.
+    a) Output files live under grib/derived-<process_id>/<base>/ (a slug
+       may hold '.' or start with a digit; catalog_grib's model names are
+       [a-z][a-z0-9_-]*).  Names are <slug>.fHHH[MM].j<job>.<hash8>.grib2
+       with the content's FNV-1a: a job that runs again with other
+       results gets a new file (files are immutable), identical results
+       reuse it.  Superseded output files lose their rows (latest wins)
+       and are deleted by Catalog::expire() like any file without rows.
+    b) Column ownership: atmo_productd sets two web-owned columns, once
+       per product per process and only when unset/free:
+       grib_model.name (if '') = product name, and the first output model
+       grid's api_name = product slug (if no model grid has it).  Chains
+       do not depend on it (a slug input resolves to centre 254 /
+       subcentre 0 / process id directly); it is for the picker, the
+       arrivals page and /v1/tiles by name.
+    c) Input values are what GribApi::decode gives: native values times
+       grib_parameter si_scale plus si_offset (the parameter's units in the
+       catalog).  They are not converted to the units a kernel declares;
+       declared units are informational.  Say if they should be converted
+       (UnitTable on the engine side).
+    d) First start: an empty cursor jumps to the current generation; data
+       already catalogued is processed only through rebuild requests.
+    e) Retries: max_attempts 2, a failed attempt is due again after 60 s
+       (retry_delay_s).  One worker loop per process, jobs run one at a
+       time; several processes are safe (conditional claim).  A thread
+       pool per device is a later step if one GPU is not kept busy.
+    f) own_previous on chain start: inputs are all-NaN; a kernel that
+       declares an int param named `has_prev` gets 0 then, else 1.
+    g) alpha is the grid rotation when any input was flagged grid-relative
+       (uvRelativeToGrid), zeros otherwise; only passed when the
+       interface asks for it.
+    h) Outputs are always template 4.0 (instantaneous) with the job's
+       offset as forecast time, simple packing, 16 bits by default
+       (productd.json "bits").  Statistical outputs (buckets with an
+       interval) need template 4.8 support in grib_derive(): next, when
+       the fruiting chain's precip buckets are built.
+    i) A job whose product, processor version or kernel revision changed
+       after it was queued is marked superseded when claimed and
+       re-planned for the current revision.  Disabled products' jobs are
+       not claimed (they wait), and their rebuild requests stay set.
+    j) Input matching prefers instantaneous messages; a statistical
+       message is used only when no instantaneous one fits.  More than
+       one match is an error on the job ("ambiguous"), never a guess.
+    k) OpenCL: a timeout cannot cancel a running kernel, so the device is
+       disabled until restart and the job fails; the systemd unit has
+       Restart=always.  Fit check uses CL_DEVICE_MAX_MEM_ALLOC_SIZE and
+       CL_DEVICE_GLOBAL_MEM_SIZE (OpenCL cannot report free memory);
+       allocation or enqueue failures fall through to the next device.
+
+Q26 [open, for review] Parameter rows and listed field names, 2026-11-21
+    (found with the first derived product: wind speed tiles 404'd).
+    a) Ingest linked a new signature to an eccodes grib_parameter row only
+       when name AND units matched.  app:grib:seed-common-names rewrites
+       a row's units to the registry's (m s-1 -> m/s), so the next new
+       signature with that name (here the centre 254 wind speed) got a
+       second "Wind speed" row without the common name.  Now: match by
+       name; units only choose between rows that share a name (exact
+       units first, else the lowest id).  Risk: two eccodes parameters
+       with one name but different meanings would share a row; none known.
+    b) The query daemon listed that second row as `wind_speed`, which
+       resolves to the common name's row, so the picker offered a name
+       that found nothing.  Now listed names are unique: an unnamed
+       parameter colliding with a common name or another unnamed one is
+       `<normalised>_p<parameter id>` (stable across reloads) and resolves
+       exactly.  The bare normalised name keeps its old meaning (common
+       name first, else ambiguous_field).
+    c) Existing duplicates are not merged automatically: point the
+       signatures at the named row, delete the orphan, restart queryd
+       (an SQL change does not bump the generation).
+

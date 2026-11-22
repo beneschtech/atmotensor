@@ -111,12 +111,8 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       index_grib/grib_decoder, manifest `gribs`, snapshot index loading,
       SnapshotFieldStore over GRIB, atmo_grib_ingest native by default,
       atmo_queryd --cache-mb/--rss-limit-mb. Details and numbers in Q10.
-- [ ] T11b Derived products (D12): write 06-derived-products.md with Chris
-      first (derivation registry format, trigger when inputs complete,
-      provenance, versioning, where feature outputs such as fronts live).
-      Then the framework plus wind speed/direction from u/v (grid-relative
-      winds rotated to earth first), with tests against hand-computed
-      values. EDR and front detection are later tasks of their own.
+- [ ] T11b Derived products (D12): superseded by 06-derived-products.md
+      (decided 2026-11-21, catalog-based) and tasks T20-T23 below.
 - [x] T14 Grid catalog schema (D13, 07-grib-catalog.md "Tables"), in
       `../web`: Doctrine entities + ONE migration for the `grib_*` tables,
       indexes for the drill-down queries and for `ingest_seq`, the
@@ -244,6 +240,104 @@ Status legend: [ ] todo, [~] in progress, [x] done.
       MySQL 8.0); picker driven in headless Chrome against a fake engine.
       Still to do: undefined-signature page + editor, app:eccodes:export,
       naming page for models / grids (name, api_name) and common names.
+- [x] T20 Products schema (06-derived-products.md "Product definitions",
+      "Jobs", "Processors"), in `../web`.
+      Done 2026-11-21 (desktop session): migration Version20261121200000,
+      entities src/Entity/Derived: derived_product, derived_product_input,
+      derived_product_output, derived_processor, derived_kernel,
+      derived_kernel_revision, derived_job, derived_state (prefix because
+      `product` = COG files already). derived_state.schema_version = 1 is
+      what atmo_productd checks; grib_catalog_state.schema_version stays 3
+      (no engine change for ingest/queryd). CHECKs on input shape, kind,
+      process_id 1..254, slug. Centre 254 "AtmoTensor" / subcentre 0
+      "Derived" seeded. `app:derived:seed [--example-wind gfs_0.25p]`
+      seeds the wind_speed kernel (resources/kernels/wind_speed.cl,
+      source_hash = FNV-1a 64 of the source, same function as GridKey) and
+      a "10 m wind speed" product (u wind_u@10m, v wind_v@10m -> 0/2/1 at
+      103/10 m). tests/php/derived_migration_test.php (32 checks, MySQL
+      8.0); grib_catalog_migration_test.php now stops at schema 3 before
+      rolling the catalog back (derived_job references grib_run).
+- [x] T21 atmo_productd skeleton: config file (MySQL like
+      catalog.json, OpenCL device list, workers, job timeout), arrival
+      monitor (generation poll, ingest_seq cursor in derived_state.cursor_seq),
+      matcher (exact by-name resolution of product_input per
+      generation; offset / previous_step / own_previous rules),
+      idempotent job creation, claim by conditional UPDATE, retry once,
+      requeue stale running jobs, superseded on replaced inputs.
+      Built-in processors only (wind_speed, wind_direction) written to
+      derived_processor at start; refuse to start unless
+      derived_state.schema_version == 2; heartbeat_at (UTC) every poll;
+      honour derived_product.rebuild_requested_at (06 "Jobs": match
+      against every retained run, compare-and-clear); compile kernels
+      whose revision != built_revision (T22). Output: GRIB2 by cloning the first
+      input (centre 254, process_id, parameter + levels from
+      product_output, simple packing, NaN bitmap), linked under
+      grib/<slug>/<run>/ and catalogued through Catalog::ingest.
+      Tests: matcher against FakeCatalog-style fixtures, wind speed vs
+      hand-computed values, output GRIB2 round-trip through
+      describe_grib(), a chain (product B on product A) triggers.
+- [x] T22 OpenCL kernels in atmo_productd: kernel ABI as in
+      "Processors"; compile on revision change, program cache per
+      (source_hash, device), build_status/build_log written back;
+      device list with fall-through when a job does not fit (record the
+      device on the job); watchdog timeout. The wind_speed kernel must
+      match the built-in bit-for-bit within float rounding (CHECK_NEAR).
+      OpenCL is optional at build time (ATMO_WITH_OPENCL=AUTO|ON|OFF);
+      without it kernel products fail with a clear reason.
+      T21 + T22 done 2026-11-21 (desktop session, at Chris's request):
+      products.h (core + matcher + built-ins), products_db.h /
+      src/products_mysql.cpp, productd.h / src/productd.cpp, opencl.h /
+      src/opencl.cpp, tools/atmo_productd.cpp, grib_derive() in grib.h,
+      CatalogFieldStore::signatures_of().  Tests: test_products (core,
+      grib_derive, matcher over an in-memory catalog), test_opencl (seed
+      kernel == built-in, build-time argument checks, params/alpha, device
+      preference; 77 without a device), test_productd (end to end on the
+      throwaway DB: rebuild requests, arrivals, chains, kernel revisions,
+      broken kernel, retries, replaced inputs, edits, stale jobs; 77
+      without ATMO_TEST_CATALOG).  ASan clean.  Notes for review: Q25.
+- [x] T23 Web: products page (list, editor with processor / kernel,
+      inputs via the grid picker, outputs, params form from the
+      processor schema, Rebuild, enable), kernel editor (admin, source +
+      build log, revision history), arrivals page (catalog per
+      model_grid: runs, offsets, counts, last arrival; product x offset
+      job grid), colormap editor over the existing colormap API.
+      Cycle check on save. (Desktop session.)
+      Arrivals page done 2026-11-21: /arrivals (+ nav link), GET
+      /api/arrivals[?runs=N&fp=], /api/arrivals/runs/{id}, /api/arrivals/
+      jobs/{id}; ArrivalsService reads grib_* and derived_* (works before
+      the derived migration too); per model grid the newest N base times,
+      a strip of forecast hours (gaps marked, fresh arrivals pulse), and
+      per run the newest job per (product, hour); daemon status from
+      derived_state.heartbeat_at (stale after 30 s: atmo_productd should
+      write it every poll, UTC). Polls every 10 s with a fingerprint
+      (generation + job digest + daemon state). Tests:
+      tests/php/arrivals_test.php (fixture in arrivals_fixture.php),
+      tests/js/arrivals.test.js.
+      Products / kernels editor done 2026-11-21: /derived (+ nav link):
+      product list and editor (kernel or built-in, params from the
+      declared interface, inputs via the grid picker in pick mode or
+      typed api_name + field@level, rules same / previous_step /
+      own_previous, outputs with level presets, live server check,
+      Save / Save & rebuild / Rebuild / Delete), kernel editor (live
+      required signature, skeleton, history, build status/log, used
+      by). API /api/derived/{products,kernels,processors,jobs/{id}/retry}
+      with validation against the interface, chain-loop check, revision
+      bump only for output-affecting edits, kernel interface changes
+      refused if they break a product. Kernel writes need
+      DERIVED_KERNEL_EDIT=1 (admin switch until accounts). New column
+      derived_product.rebuild_requested_at (migration
+      Version20261121220000, derived schema 2): see "Jobs" in 06 and
+      T21. Tests: tests/php/derived_api_test.php, tests/js/derived.test.js.
+      Colormap editor done 2026-11-21: /colormaps (+ nav link) over the
+      existing /api/colormaps: globals read-only with "Make a copy",
+      contiguous segments by construction (only the first start and the
+      ends are typed), colour + hex + opacity per end, blend per segment,
+      split / remove / add / reverse / stretch, import of engine cmap
+      text (colour jumps folded back), colour bar with boundaries and
+      hover readout, sample field; ramp maths as the engine
+      (assets/lib/colormap_edit.js, tests/js/colormap_edit.test.js).
+      T23 web side complete; the job grid and build status fill in once
+      T21/T22 run.
 - [ ] T12 Route sampling + corridor obs (moved here from T4): design the
       corridor query with selectable strategies for using the route points.
 - [ ] T13 OpenCL ABI: flat-buffer views of Grid / FieldFile tile tables / obs
